@@ -1,0 +1,58 @@
+name: knowyet-model-gateway
+services:
+  new-api:
+    image: ${NEW_API_IMAGE:?Set a source-built image tag}
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:3000:3000"
+    env_file:
+      - runtime.env
+    environment:
+      PORT: "3000"
+      TZ: Asia/Shanghai
+      BATCH_UPDATE_ENABLED: "false"
+      PASSWORD_LOGIN_ENCRYPTION_ENABLED: "true"
+      SESSION_COOKIE_SECURE: "true"
+      SESSION_COOKIE_TRUSTED_URL: "https://api.knowyet.com"
+      NODE_NAME: sso-model-gateway-1
+    command: ["--log-dir", "/app/logs"]
+    volumes:
+      - ./data:/data
+      - ./logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+    mem_limit: 1536m
+    cpus: 2.0
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/status"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+  redis:
+    image: ${REDIS_IMAGE:-redis:7.4-alpine}
+    restart: unless-stopped
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - redis-data:/data
+      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
+    mem_limit: 320m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$$(sed -n 's/^requirepass //p' /usr/local/etc/redis/redis.conf) redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+volumes:
+  redis-data:

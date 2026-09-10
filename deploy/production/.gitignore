@@ -1,0 +1,7 @@
+.env
+runtime.env
+data/
+logs/
+
+redis.conf
+bootstrap-admin.json

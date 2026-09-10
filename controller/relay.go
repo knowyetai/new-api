@@ -128,6 +128,13 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		return
 	}
 
+	if !c.GetBool("billing_resolved") {
+		unit, err := model.ResolveBillingUnit(relayInfo.UserId)
+		if err != nil || unit != nil {
+			newAPIError = types.NewErrorWithStatusCode(fmt.Errorf("billing unit requires authenticated chat completions endpoint"), types.ErrorCodeInvalidRequest, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+			return
+		}
+	}
 	needSensitiveCheck := setting.ShouldCheckPromptSensitive()
 	needCountToken := constant.CountToken
 	// Avoid building huge CombineText (strings.Join) when token counting and sensitive check are both disabled.

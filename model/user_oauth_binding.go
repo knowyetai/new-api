@@ -9,6 +9,7 @@ import (
 
 // UserOAuthBinding stores the binding relationship between users and custom OAuth providers
 type UserOAuthBinding struct {
+	ModelTokenId   int       `json:"-" gorm:"default:0"` // Durable Token reference; deleted/revoked Tokens are never recreated automatically.
 	Id             int       `json:"id" gorm:"primaryKey"`
 	UserId         int       `json:"user_id" gorm:"not null;uniqueIndex:ux_user_provider"`                                    // User ID - one binding per user per provider
 	ProviderId     int       `json:"provider_id" gorm:"not null;uniqueIndex:ux_user_provider;uniqueIndex:ux_provider_userid"` // Custom OAuth provider ID

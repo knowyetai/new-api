@@ -165,6 +165,20 @@ func SetApiRouter(router *gin.Engine) {
 		}
 
 		// Subscription billing (plans, purchase, admin management)
+		apiRouter.POST("/integrations/model-credentials", middleware.RootAuth(), controller.ResolveModelCredential)
+		billingUnits := apiRouter.Group("/billing-units")
+		billingUnits.Use(middleware.UserAuth())
+		{
+			billingUnits.POST("", middleware.CriticalRateLimit(), controller.CreateBillingUnit)
+			billingUnits.GET("", controller.ListBillingUnits)
+			billingUnits.GET("/self", controller.GetMyBillingUnit)
+			billingUnits.PATCH("/:id", controller.SetBillingUnitEnabled)
+			billingUnits.GET("/:id", controller.GetBillingUnit)
+			billingUnits.GET("/:id/members", controller.BillingUnitMembers)
+			billingUnits.PUT("/:id/members/:user_id", controller.BillingUnitMembers)
+			billingUnits.DELETE("/:id/members/:user_id", controller.BillingUnitMembers)
+			billingUnits.GET("/:id/usage", controller.BillingUnitUsage)
+		}
 		subscriptionRoute := apiRouter.Group("/subscription")
 		subscriptionRoute.Use(middleware.UserAuth())
 		{

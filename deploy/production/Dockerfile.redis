@@ -1,0 +1,7 @@
+# Fallback for this host without Docker Hub access; signed Alpine packages.
+FROM alpine:latest
+RUN apk add --no-cache redis && mkdir -p /data && chown redis:redis /data
+USER redis
+WORKDIR /data
+EXPOSE 6379
+CMD ["redis-server"]
