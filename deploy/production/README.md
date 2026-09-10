@@ -40,3 +40,9 @@ Docker Hub 拉取 Redis 超时时，使用 Dockerfile.redis 从缓存 Alpine 安
 验证通过：两个容器 healthy；公网 HTTPS 主页、静态资源、状态接口返回 200；管理员加密登录、设置更新、资源包列表和退出通过；匿名访问资源包接口、凭据分配 POST、模型调用 POST 返回 401；HTTP 跳转 HTTPS；原 SSO 主页仍为 200。管理员随机凭据仅保存于服务器 bootstrap-admin.json（0600）。公网证书已签发，已有 certbot 续期 Nginx reload hook。
 
 内网 https://api-inner.knowyet.com 已接通，Nginx 限制私网来源；SSO 主机和预发服务器 8.130.130.198 访问状态接口均为 200，证书验证通过；从公网指定该域名访问返回 403。内网证书有效期至 2026-12-09，采用 certbot --manual DNS 验证，尚未配置 DNS 自动验证 hook，因此不能自动续期，需要到期前手工续期或接入 DNS 自动化。未配置真实模型渠道、充值商户或 SSO OAuth Provider，未切换 known-engine 生产模型调用；本次验证不代表生产端到端计费链路已开通。后续配置 SSO 集成与 mock 链路验证，并补齐内网证书自动续期。
+
+## 预发业务接入验收
+
+2026-09-10 已配置独立 Casdoor model-gateway 应用和 new-api casdoor 提供商（ID 1），scopes 为 openid profile。8.130.130.198 的 known-engine Gateway/Worker 同时启用内网模型网关，使用 deepseek-v4-flash。peilong 真实 SSO/aibrain/Agent 验收共 8 个任务：5 次成功，余额不足、单元停用、个人 Token 停用各拒绝 1 次；个人与单元付款日志和余额逐笔一致。new-api 自身 SSO 页面登录也通过，映射到同一用户 ID 2。
+
+测试用户现为个人付款，个人 Token 已恢复启用；专用测试计费单元 ID 1 已停用，保留历史账目和余额。配置切换使用完整 test + sso Compose 组合，回退配置在预发主机 .env.before-model-gateway。验收详情见 known-engine 的 docs/model-gateway/design-and-usercases.md。生产 known-engine 未切换；真实支付、真实上游故障注入、第二个业务系统及双真实 SSO 用户共享消费仍未在预发验收。
