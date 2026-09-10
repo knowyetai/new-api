@@ -346,6 +346,12 @@ func handleOAuthLogin(c *gin.Context, provider oauth.Provider, oauthUser *oauth.
 		return
 	}
 
+	if custom, ok := provider.(*oauth.GenericOAuthProvider); ok {
+		if err := model.SyncIntegrationDisplayName(custom.GetProviderId(), oauthUser.ProviderUserID, oauthUser.DisplayName); err != nil {
+			writeSecurityOperationError(c, err)
+			return
+		}
+	}
 	// 9. Setup login
 	setupLogin(user, c)
 }

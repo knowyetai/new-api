@@ -15,15 +15,16 @@ func ResolveModelCredential(c *gin.Context) {
 		return
 	}
 	var req struct {
-		ProviderID int    `json:"provider_id"`
-		Issuer     string `json:"issuer"`
-		Subject    string `json:"subject"`
+		DisplayName string `json:"display_name"`
+		ProviderID  int    `json:"provider_id"`
+		Issuer      string `json:"issuer"`
+		Subject     string `json:"subject"`
 	}
 	if common.DecodeJson(c.Request.Body, &req) != nil || req.ProviderID <= 0 || req.Issuer == "" || req.Subject == "" || len(req.Subject) > 256 {
 		c.JSON(400, gin.H{"success": false, "message": "invalid identity"})
 		return
 	}
-	token, err := model.ResolveIntegrationCredential(req.ProviderID, req.Issuer, req.Subject)
+	token, err := model.ResolveIntegrationCredential(req.ProviderID, req.Issuer, req.Subject, req.DisplayName)
 	if err != nil {
 		c.JSON(409, gin.H{"success": false, "message": "model identity unavailable"})
 		return

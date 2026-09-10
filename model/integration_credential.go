@@ -14,9 +14,13 @@ import (
 // ResolveIntegrationCredential is for a trusted platform which has already
 // authenticated the external subject. It never accepts a payer or a native user ID.
 // The OAuth binding and Token stay authoritative in this database.
-func ResolveIntegrationCredential(providerID int, issuer, subject string) (*Token, error) {
+func ResolveIntegrationCredential(providerID int, issuer, subject string, displayNames ...string) (*Token, error) {
 	if providerID <= 0 || subject == "" || len(subject) > 256 || issuer == "" {
 		return nil, errors.New("invalid identity")
+	}
+	displayName := ""
+	if len(displayNames) > 0 {
+		displayName = integrationDisplayName(displayNames[0])
 	}
 	var result Token
 	err := DB.Transaction(func(tx *gorm.DB) error {
@@ -45,6 +49,9 @@ func ResolveIntegrationCredential(providerID int, issuer, subject string) (*Toke
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				digest := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s", providerID, subject)))
 				user := User{Username: fmt.Sprintf("sso_%x", digest[:8]), DisplayName: "SSO user", Role: common.RoleCommonUser, Status: common.UserStatusEnabled}
+				if displayName != "" {
+					user.DisplayName = displayName
+				}
 				if err = user.InsertWithTx(tx, 0); err != nil {
 					return err
 				}
@@ -76,6 +83,11 @@ func ResolveIntegrationCredential(providerID int, issuer, subject string) (*Toke
 		if binding.ProviderUserId != subject {
 			return errors.New("identity changed")
 		}
+		if displayName != "" && displayName != user.DisplayName {
+			if err = tx.Model(&user).Update("display_name", displayName).Error; err != nil {
+				return err
+			}
+		}
 		if binding.ModelTokenId == 0 {
 			var count int64
 			if err = tx.Model(&Token{}).Where("user_id = ?", user.Id).Count(&count).Error; err != nil {
@@ -106,4 +118,50 @@ func ResolveIntegrationCredential(providerID int, issuer, subject string) (*Toke
 		return nil, err
 	}
 	return &result, nil
+}
+
+// integrationDisplayName follows the existing native display-name limit.
+// It is presentation metadata, never an account lookup or authorization field.
+func integrationDisplayName(value string) string {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) > 20 {
+		runes = runes[:20]
+	}
+	return string(runes)
+}
+
+// SyncIntegrationDisplayName updates only accounts provisioned for model use.
+// Ordinary OAuth accounts keep their existing native profile behavior.
+func SyncIntegrationDisplayName(providerID int, subject, displayName string) error {
+	displayName = integrationDisplayName(displayName)
+	if displayName == "" {
+		return nil
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var binding UserOAuthBinding
+		err := tx.Where("provider_id = ? AND provider_user_id = ?", providerID, subject).First(&binding).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if binding.ProviderUserId != subject {
+			return errors.New("identity mismatch")
+		}
+		if binding.ModelTokenId == 0 {
+			return nil
+		}
+		var user User
+		if err = lockForUpdate(tx).First(&user, binding.UserId).Error; err != nil {
+			return err
+		}
+		if user.Status != common.UserStatusEnabled {
+			return errors.New("user disabled")
+		}
+		if user.DisplayName == displayName {
+			return nil
+		}
+		return tx.Model(&user).Update("display_name", displayName).Error
+	})
 }

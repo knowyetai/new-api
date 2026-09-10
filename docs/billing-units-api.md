@@ -109,7 +109,7 @@ MODEL_GATEWAY_TEST_MYSQL_URL='...' MODEL_GATEWAY_TEST_NEW_API_BINARY='...' \
 请求：
 
 ```json
-{"provider_id": 1, "issuer": "https://sso.example.com", "subject": "immutable-sso-subject"}
+{"provider_id": 1, "issuer": "https://sso.example.com", "subject": "immutable-sso-subject", "display_name": "张三"}
 ```
 
 响应（HTTP 200，`Cache-Control: no-store`）：
@@ -118,6 +118,9 @@ MODEL_GATEWAY_TEST_MYSQL_URL='...' MODEL_GATEWAY_TEST_NEW_API_BINARY='...' \
 {"success": true, "data": {"user_id": 12, "token_id": 34, "key": "sk-<personal-model-token>"}}
 ```
 
+- `display_name` 为可选显示名，来自受信任平台已经验证的 SSO `name`，不能取浏览器自行提交的任意资料。首次开户写入；后续断言仅在非空且有变化时更新。去除首尾空白后最多保留 20 个 Unicode 字符；省略或全空白保留原值，首次无值沿用 `SSO user`。
+- 显示名允许重复，绝不用于查找或合并账户；原有 username、用户 ID、身份绑定、模型 Token、权限、余额和账单关系不变。不新增表或唯一约束。
+- 已有模型 Token 绑定的账户直接使用该 OAuth 提供商登录时，也从验证后的用户资料更新显示名。普通 OAuth 账户（`model_token_id=0`）沿用原有行为。同步发生于登录/获取模型凭证时，不运行定时同步；SSO 改名后旧页面可能需重新登录或刷新。
 - `provider_id` 是已通过原生 `/api/custom-oauth-provider/` 配置的自定义 OAuth 提供商 ID。提供商必须启用，`user_id_field` 为 `sub`，`well_known` 精确对应 issuer 后加 `/.well-known/openid-configuration`。当前断言接口不支持配置了 `access_policy` 的提供商，会拒绝而不绕过该策略。
 - 调用平台必须先验签、校验 issuer/audience/会话与用户权限，再从可信身份绑定读取 subject。此接口信任 root 后端断言，本身不接收或二次校验 Casdoor access_token；不可直接代理任意客户端提交的 subject。
 - 按原生 `user_oauth_bindings(provider_id, provider_user_id)` 查找用户；不存在时，在同一事务内创建普通 native User、绑定和个人模型 Token，不按姓名或邮箱自动认领旧账户。新用户沿用原生 `QuotaForNewUser` 配置；正式计费可设为 0。
@@ -141,3 +144,11 @@ curl -X POST "$BASE/api/integrations/model-credentials" \
 本次修复双实例首次获取凭证时 MySQL 可重复读快照不可见的问题：在用户锁下读取最新绑定与 Token，第二实例不会因旧快照误判 Token 不存在。
 
 升级时随 native AutoMigrate 增加 `user_oauth_bindings.model_token_id`；默认 0 不影响旧 OAuth 身份。回滚保留该字段与新建的真实用户/Token/消费记录。旧共享付款账户只是未上线实验，相关实现已删除，不实施历史余额迁移。此接口可重复调用以核对绑定，不用于转移余额或重写账单。
+
+## 显示名同步发布与回退
+
+先发布支持可选 `display_name` 的 new-api，再发布 known-engine Gateway/Worker。旧调用方省略字段仍可使用，不需要数据库升级或全量重开户。回退代码只停止后续同步，保留已经写入的显示名，不涉及额度或账单回滚。Casdoor 与 aibrain 无须改代码，OAuth `display_name_field` 应映射为 `name`。
+
+安全依据：OWASP Authentication、Session Management、OAuth2 Cheat Sheets；保留既有凭证验证、身份绑定、会话和权限判断。显示名是展示资料，不参与认证授权。
+
+2026-09-10 本机验证：显示名与计费回归在 SQLite、MySQL、PostgreSQL 全部通过；实际 OAuth 登录处理器返回新显示名，空值重登保留原值。Go 后端构建通过。known-engine 的 10 项测试全部通过（98.23 秒），包含真实 Casdoor 浏览器登录、aibrain、Gateway/Worker、new-api 与 mock 推理链路，核对自动开户显示名以及个人/单元扣费、退款、Token 稳定性。本次验证未部署生产环境。

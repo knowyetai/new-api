@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/oauth"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
@@ -12,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -180,7 +182,7 @@ func TestBillingUnitAPIAndSettlement(t *testing.T) {
 			provider := model.CustomOAuthProvider{Name: "Local", Slug: "local", Enabled: true, WellKnown: "http://127.0.0.1:18001/.well-known/openid-configuration", UserIdField: "sub"}
 			require.NoError(t, db.Create(&provider).Error)
 			router.POST("/credential", ResolveModelCredential)
-			payload := fmt.Sprintf(`{"provider_id":%d,"issuer":"http://127.0.0.1:18001","subject":"native-alice"}`, provider.Id)
+			payload := fmt.Sprintf(`{"provider_id":%d,"issuer":"http://127.0.0.1:18001","subject":"native-alice","display_name":" 张三 "}`, provider.Id)
 			assert.Equal(t, 403, request("POST", "/credential", payload).Code)
 			role = common.RoleRootUser
 			require.Equal(t, 200, request("POST", "/credential", payload).Code)
@@ -193,6 +195,43 @@ func TestBillingUnitAPIAndSettlement(t *testing.T) {
 			var bindings int64
 			require.NoError(t, db.Model(&model.UserOAuthBinding{}).Where("provider_id = ?", provider.Id).Count(&bindings).Error)
 			assert.EqualValues(t, 2, bindings)
+
+			// Profile synchronization is independent of identity and billing.
+			before, err := model.GetUserById(first.UserId, false)
+			require.NoError(t, err)
+			assert.Equal(t, "张三", before.DisplayName)
+			renamed := strings.Replace(payload, " 张三 ", "李四", 1)
+			require.Equal(t, 200, request("POST", "/credential", renamed).Code)
+			require.NoError(t, model.SyncIntegrationDisplayName(provider.Id, "native-alice", "王五"))
+			for _, name := range []string{"", "  "} {
+				_, err = model.ResolveIntegrationCredential(provider.Id, "http://127.0.0.1:18001", "native-alice", name)
+				require.NoError(t, err)
+				require.NoError(t, model.SyncIntegrationDisplayName(provider.Id, "native-alice", name))
+			}
+			after, err := model.GetUserById(first.UserId, false)
+			require.NoError(t, err)
+			assert.Equal(t, "王五", after.DisplayName)
+			after.DisplayName = before.DisplayName
+			assert.Equal(t, before, after)
+			again, err := model.ResolveIntegrationCredential(provider.Id, "http://127.0.0.1:18001", "native-alice")
+			require.NoError(t, err)
+			assert.Equal(t, first, again)
+			other, err := model.ResolveIntegrationCredential(provider.Id, "http://127.0.0.1:18001", "native-bob", "王五")
+			require.NoError(t, err)
+			assert.NotEqual(t, first.UserId, other.UserId)
+			assert.NotEqual(t, first.Id, other.Id)
+			require.NoError(t, model.SyncIntegrationDisplayName(provider.Id, "native-bob", strings.Repeat("名", 25)))
+			otherUser, err := model.GetUserById(other.UserId, false)
+			require.NoError(t, err)
+			assert.Equal(t, strings.Repeat("名", 20), otherUser.DisplayName)
+			ordinaryBefore, err := model.GetUserById(2, false)
+			require.NoError(t, err)
+			require.NoError(t, model.SyncIntegrationDisplayName(provider.Id, "bound-before-upgrade", "不可覆盖"))
+			ordinaryAfter, err := model.GetUserById(2, false)
+			require.NoError(t, err)
+			assert.Equal(t, ordinaryBefore, ordinaryAfter)
+			require.NoError(t, db.Model(&model.User{}).Where("id = ?", other.UserId).Update("status", common.UserStatusDisabled).Error)
+			require.Error(t, model.SyncIntegrationDisplayName(provider.Id, "native-bob", "禁止更新"))
 			_, err = model.ResolveIntegrationCredential(provider.Id, "http://wrong.local", "native-alice")
 			require.Error(t, err)
 			require.NoError(t, db.Model(first).Update("status", 2).Error)
@@ -212,4 +251,40 @@ func TestBillingUnitAPIAndSettlement(t *testing.T) {
 
 		})
 	}
+}
+
+// Exercise the actual post-provider login handler and returned browser profile.
+func TestIntegrationDisplayNameOAuthLogin(t *testing.T) {
+	user, _ := setupSecurityEnrollmentTest(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.Token{}, &model.CustomOAuthProvider{}))
+	provider := model.CustomOAuthProvider{Name: "Local", Slug: "local", Enabled: true, WellKnown: "http://127.0.0.1:18001/.well-known/openid-configuration", UserIdField: "sub"}
+	require.NoError(t, model.DB.Create(&provider).Error)
+	binding := model.UserOAuthBinding{UserId: user.Id, ProviderId: provider.Id, ProviderUserId: "stable-subject"}
+	require.NoError(t, model.DB.Create(&binding).Error)
+	token, err := model.ResolveIntegrationCredential(provider.Id, "http://127.0.0.1:18001", "stable-subject", "原名")
+	require.NoError(t, err)
+	for _, name := range []string{"新显示名", ""} {
+		response := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(response)
+		ctx.Request = httptest.NewRequest("GET", "/api/oauth/local", nil)
+		handleOAuthLogin(ctx, oauth.NewGenericOAuthProvider(&provider), &oauth.OAuthUser{ProviderUserID: "stable-subject", DisplayName: name}, &model.AuthFlow{Payload: "{}"})
+		var result struct {
+			Success bool `json:"success"`
+			Data    struct {
+				User struct {
+					DisplayName string `json:"display_name"`
+					Id          int    `json:"id"`
+					Username    string `json:"username"`
+				} `json:"user"`
+			} `json:"data"`
+		}
+		require.NoError(t, common.Unmarshal(response.Body.Bytes(), &result))
+		require.True(t, result.Success)
+		assert.Equal(t, "新显示名", result.Data.User.DisplayName)
+		assert.Equal(t, user.Id, result.Data.User.Id)
+		assert.Equal(t, user.Username, result.Data.User.Username)
+	}
+	again, err := model.ResolveIntegrationCredential(provider.Id, "http://127.0.0.1:18001", "stable-subject")
+	require.NoError(t, err)
+	assert.Equal(t, token, again)
 }
