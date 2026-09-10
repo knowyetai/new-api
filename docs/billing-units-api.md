@@ -152,3 +152,14 @@ curl -X POST "$BASE/api/integrations/model-credentials" \
 安全依据：OWASP Authentication、Session Management、OAuth2 Cheat Sheets；保留既有凭证验证、身份绑定、会话和权限判断。显示名是展示资料，不参与认证授权。
 
 2026-09-10 本机验证：显示名与计费回归在 SQLite、MySQL、PostgreSQL 全部通过；实际 OAuth 登录处理器返回新显示名，空值重登保留原值。Go 后端构建通过。known-engine 的 10 项测试全部通过（98.23 秒），包含真实 Casdoor 浏览器登录、aibrain、Gateway/Worker、new-api 与 mock 推理链路，核对自动开户显示名以及个人/单元扣费、退款、Token 稳定性。本次验证未部署生产环境。
+
+## 2026-09-10 显示名同步预发部署验收
+
+- new-api 功能提交 `ed3c64868` 已推送 `test`；SSO 主机的共享网关运行源码构建镜像 `knowyet-new-api:ed3c64868`（镜像 `85807e3a4550`），沿用未修改的已构建前端。旧镜像 `knowyet-new-api:billing-units-20260910` 和部署配置备份保留，可切回；无数据库迁移。
+- known-engine 显示名功能提交 `d16c82c`，随后将测试夹具修正一起推送 `test`，GitHub 自动部署已执行。使用 `docker-compose.test.yml` 加 `.env.sso` / `docker-compose.sso.yml`，Gateway、Worker 的运行文件 SHA 与提交代码一致，Casdoor 模式和模型网关开关正常。aibrain 源码未变。
+- 临时将测试账号 peilong 的 Casdoor 显示名改为“佩龙预发验证”。直接 new-api 浏览器登录、aibrain 登录换取 known-engine 凭证、Agent 获取模型 Token 均验证显示名一致。完成后恢复为 peilong 并重登验证。用户 ID 2 / Token ID 1 / username peilong 不变。
+- new-api 部署后接口验证：非空改名、空白/缺失保留、20 个中文字符截断、模型 Token 无权调用后台身份断言；显示名变化不改变其他账户字段。首次开户、同名不同账户、普通 OAuth 不覆盖及错误身份拒绝由本机自动化覆盖。
+- 预发金融审查测试知识库共执行 6 次真实 Agent → new-api → DeepSeek 任务：个人付款成功、加入单元付款成功、单元停用拒绝、单元恢复后成功、个人 Token 停用拒绝、退出单元且 Token 恢复后个人付款成功。四条消费日志输入合计 19829 / 输出 177 token，个人扣 2741 quota，单元扣 2740 quota，总计 5481；余额变动与消费日志一致，拒绝请求无新增消费。测试结束时个人余额 43236，测试付款账户余额 44607，个人 Token 已启用，已退出测试单元且单元停用。
+- 本机回归：模型网关/真实 SSO/多用户共享计费完整链路 10 项；SSO、仓库单写、崩溃审计、恢复、webhook/部署配置 106 项；独立真实 Gitea 的 4 项另行全部通过（首次未启用该实例而跳过）；aibrain 认证/会话/刷新 39 项；真实 SDK + mock 推理 Worker 协议 5 项。共 164 项 Python 测试通过。new-api SQLite/MySQL/PostgreSQL 计费与显示名测试、OAuth 登录响应测试及后端构建通过。
+- 回归中修正两处测试夹具问题：SQLite 恢复 CLI 改用 ACH_HOME_ROOT 定位测试库；旧 Worker 测试先持久化任务再入队，并使用独立 Redis/mock 上游，避免绕过现有 SQL 执行认领流程。没有为测试放宽业务权限。
+- 边界：共享生产服务未进行真实供应商故障注入、真实支付扣款、运行中 Worker 强杀或 NAS 并发破坏测试；相应可重复的退款/崩溃/写冲突场景在本机隔离环境回归。以上不代表整个产品所有无关测试或真实支付链均已验收。
