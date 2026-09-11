@@ -251,3 +251,28 @@ new-api 固定价格矩阵另设专用 `TEST_FIXED_MYSQL_DSN` / `TEST_FIXED_POST
 复现入口：本机私有目录 `/home/ubuntu/code/.local/team-validation/run-regression.py` 按组调用 pytest，`run-service-regression.py` 调用 Go 服务层测试；统一由 `run-limited.py` 串行执行。Python 的测试文件范围为 `tests/test_resource_write_cases.py`、`test_resource_write_audit.py`、`test_webhook_safe_sync.py`、`test_gitea_sync_result.py`、`test_git_push_log_privacy.py`、`L0_unit/test_deploy_config.py`；认证组为 `L0_unit/test_casdoor.py`、`test_jwt_utils.py`、`test_local_provider.py`、`test_sso_redis_state.py`、`L1_sqlite/test_casdoor_migration.py`、`L2_storage/test_sso_storage.py`、`L4_gateway/test_casdoor_api.py`、`test_auth_api.py`、`tests/test_model_gateway_credentials.py`、`test_model_chat_routing.py`；知识库组为 `L4_gateway/test_http_kms.py`、`test_kb_file_download.py`、`test_session_files.py`；真实依赖组为 `tests/test_gitea_webhook_management.py`、`L5_worker/test_agent_runtime.py`。执行时保留完整父目录前缀；私有 JUnit XML 和 Go JSON 记录在同一验证目录，不包含于 Git 文档。
 
 本轮执行组峰值 RSS 744 MiB、匿名内存 435 MiB，未触发内存保护。仍未覆盖真实 NAS/FUSE 故障、真实支付扣款、真实供应商故障及整个仓库所有无关测试；这些结果不能表述为生产验收完成。本轮不提交或部署代码。
+
+### 2026-09-11 团队自助计费发布及预发验收
+
+本节更新以上本地验收阶段的“尚未提交/部署”状态。new-api 功能提交 `f374435dd`、known-engine 联调用例提交 `1efbd83` 均已推送 `test`；aibrain 本轮无源码变更。known-engine 原有自动部署已执行，Gateway/Runtime 正常运行。
+
+共享 SSO 主机的模型网关已更新为 `knowyet-new-api:f374435dd`，镜像 ID `8a474b5638e47de4386a91463bb5046d214b4448f244d8bebd0dc5cca901d045`，`/api/status` 版本为 `team-f374435dd`。以提交源码及已验证的前端产物编译静态 Go 二进制，再基于原运行镜像替换程序，保留原运行依赖与许可证；源归档和二进制 SHA256 均核对。公网 `https://api.knowyet.com`、内网 `https://api-inner.knowyet.com` 都验证返回新版本。
+
+RDS MySQL 8.0.36 的 39 张表已通过 `mariadb-dump --single-transaction --quick --routines --triggers --events --skip-lock-tables --hex-blob` 一致性导出，校验 gzip、完成标记、39 个 CREATE TABLE 和 SHA256。备份及原 `.env/runtime.env/compose.yaml` 保存在 SSO 主机 `/opt/knowyet-model-gateway/backups/team-f374435dd/`，目录 0700；原镜像 `knowyet-new-api:ed3c64868` 保留。此为导出完整性核对，未声称执行过生产备份恢复演练。
+
+先保持三项开关关闭发布，验证新增邀请表/列、旧行默认值，以及用户、Token、身份绑定、成员和订单行数未改变。旧登录会话继续访问成功，peilong 原有个人 Token 真实调用 DeepSeek 成功并扣 11 quota。之后开启自助团队和用户明确选择后的个人兜底，团队充值保持关闭；目录配置复用已验证的 Casdoor model-gateway 应用，只在后端保存，按用户名精确查询 `knowyet` 组织，provider ID 为 1。
+
+预发实际验收：
+
+- 独立普通账号通过真实费用中心页面创建初始零余额团队，按用户名邀请 peilong；peilong 通过 Knowyet SSO 登录后在页面确认加入。成员姓名、邀请状态、充值入口隐藏、移动视口均验证。一次页面加载等待超时，重新打开通过，重试未观察到 JavaScript/HTTP 错误。
+- 普通负责人直接 PUT 加成员被拒绝，普通成员查询团队总体账单被拒绝，充值接口因开关关闭拒绝。管理员仅向专用测试团队临时注入 10000 quota，没有执行真实支付，也没有转移客户余额。
+- peilong 和另一普通用户分别使用独立模型 Token 调用 DeepSeek，各由团队扣 11 quota；团队停用后，请求拒绝，个人兜底开启也不绕过停用。
+- peilong 经 `http://aibrain-pre.knowyet.com/aibrain` 真实 SSO 登录及读取知识库通过。使用“金融审查测试”知识库提交只读问答，任务 `task-906db88023c6` 完成 aibrain → known-engine Agent → new-api → 真实上游链路，团队扣 1365 quota，个人未扣。
+- 团队三条消费共 1387 quota，日志消费者为两个独立用户，消费汇总与钱包变动一致。清除剩余临时额度后，无个人兜底时拒绝；本人明确开启兜底后个人扣 11 quota；退出团队、关闭兜底后个人调用再扣 11 quota。
+- 验收结束：peilong 无计费团队，个人兜底关闭，个人余额 43203 quota；测试团队余额 0、已停用、无成员，临时普通账号已停用，其模型凭证随账号不可用。真实消费和操作审计记录保留，不回滚已发生账单。
+
+验收中管理员测试会话返回 401，重新登录恢复；密集重复认证操作还触发原生每 IP 20 次/20 分钟限制，`/api/oauth/state` 返回 429。未关闭或清除限流，等待窗口自然结束后复核登录。aibrain 首次检查误按 `user.username` 断言，按现有 `user.name` 响应契约修正验收脚本后通过；本轮未为这些测试环境/脚本问题修改业务代码。
+
+回退操作：先关闭团队入口及兜底开关；保留现有账单、新增列/表和已支付订单。需要回退程序时，将 `.env` 的镜像改回 `knowyet-new-api:ed3c64868` 并恢复备份运行配置，只重建 new-api 服务；不得恢复发布前数据库快照覆盖发布后消费。由于是共享网关，该操作也影响生产调用，应按共享服务发布处理。
+
+团队在线充值/实际支付宝付款仍未验收，`BILLING_TEAM_TOPUP_ENABLED=false`；NAS/FUSE 故障不在本次发布验收范围。
