@@ -249,7 +249,19 @@ func TestBillingTeamSelfService(t *testing.T) {
 			info, ctx := newSession()
 			_, apiErr := service.NewBillingSession(ctx, info, 100)
 			require.NotNil(t, apiErr)
+			assert.Equal(t, "team_quota_personal_fallback_disabled", string(apiErr.GetErrorCode()))
 			require.NoError(t, model.UpdatePersonalBillingFallback(alice, true))
+			require.NoError(t, db.Model(&model.User{}).Where("id = ?", alice).Update("quota", 0).Error)
+			info, ctx = newSession()
+			_, apiErr = service.NewBillingSession(ctx, info, 100)
+			require.NotNil(t, apiErr)
+			assert.Equal(t, "team_and_personal_quota_insufficient", string(apiErr.GetErrorCode()))
+			info, ctx = newSession()
+			info.BillingUserId, info.BillingUnitId = alice, 0
+			_, apiErr = service.NewBillingSession(ctx, info, 100)
+			require.NotNil(t, apiErr)
+			assert.Equal(t, "personal_quota_insufficient", string(apiErr.GetErrorCode()))
+			require.NoError(t, db.Model(&model.User{}).Where("id = ?", alice).Update("quota", 1000).Error)
 			info, ctx = newSession()
 			session, apiErr := service.NewBillingSession(ctx, info, 100)
 			require.Nil(t, apiErr)
@@ -300,6 +312,7 @@ func TestBillingTeamSelfService(t *testing.T) {
 			_, apiErr = service.NewBillingSession(ctx, info, 300)
 			require.NotNil(t, apiErr)
 			assert.Equal(t, team.PayerUserId, info.BillingUserId)
+			assert.Equal(t, "team_quota_insufficient", string(apiErr.GetErrorCode()))
 			// Two requests competing for the last team balance reserve at most once.
 			sessions := make(chan *service.BillingSession, 2)
 			for range 2 {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
@@ -472,8 +473,14 @@ func newBillingSessionForPayer(c *gin.Context, relayInfo *relaycommon.RelayInfo,
 // Personal fallback is a single pre-upstream decision, never a settlement retry.
 func NewBillingSession(c *gin.Context, info *relaycommon.RelayInfo, quota int) (*BillingSession, *types.NewAPIError) {
 	session, apiErr := newBillingSessionForPayer(c, info, quota)
-	if apiErr == nil || info == nil || info.BillingUnitId == 0 || os.Getenv("BILLING_TEAM_PERSONAL_FALLBACK_ENABLED") != "true" {
+	if apiErr == nil || info == nil {
 		return session, apiErr
+	}
+	if info.BillingUnitId == 0 {
+		return session, describeQuotaFailure(apiErr, "personal_quota_insufficient")
+	}
+	if os.Getenv("BILLING_TEAM_PERSONAL_FALLBACK_ENABLED") != "true" {
+		return session, describeQuotaFailure(apiErr, "team_quota_insufficient")
 	}
 	if !errors.Is(apiErr, ErrInsufficientWalletQuota) && !errors.Is(apiErr, model.ErrNoActiveSubscription) && !errors.Is(apiErr, model.ErrSubscriptionQuotaInsufficient) {
 		return nil, apiErr
@@ -483,8 +490,11 @@ func NewBillingSession(c *gin.Context, info *relaycommon.RelayInfo, quota int) (
 	if err != nil {
 		return nil, types.NewError(fmt.Errorf("billing preference unavailable"), types.ErrorCodeQueryDataError, types.ErrOptionWithSkipRetry())
 	}
-	if user.Status != common.UserStatusEnabled || !user.GetSetting().PersonalBillingFallback {
+	if user.Status != common.UserStatusEnabled {
 		return nil, apiErr
+	}
+	if !user.GetSetting().PersonalBillingFallback {
+		return nil, describeQuotaFailure(apiErr, "team_quota_personal_fallback_disabled")
 	}
 	candidate := *info
 	candidate.BillingUserId = info.UserId
@@ -492,11 +502,29 @@ func NewBillingSession(c *gin.Context, info *relaycommon.RelayInfo, quota int) (
 	candidate.UserSetting = user.GetSetting()
 	session, apiErr = newBillingSessionForPayer(c, &candidate, quota)
 	if apiErr != nil {
-		return nil, apiErr
+		return nil, describeQuotaFailure(apiErr, "team_and_personal_quota_insufficient")
 	}
 	*info = candidate
 	session.relayInfo = info
 	c.Set("billing_user_id", info.UserId)
 	c.Set("billing_unit_id", 0)
 	return session, nil
+}
+
+// Only classify funding shortages after the original payer/fallback decision.
+// Token limits, disabled accounts and infrastructure failures keep their errors.
+func describeQuotaFailure(err *types.NewAPIError, code types.ErrorCode) *types.NewAPIError {
+	if err == nil || err.GetErrorCode() != types.ErrorCodeInsufficientUserQuota ||
+		(!errors.Is(err, ErrInsufficientWalletQuota) && !errors.Is(err, model.ErrNoActiveSubscription) &&
+			!errors.Is(err, model.ErrSubscriptionQuotaInsufficient) && !strings.HasPrefix(err.Error(), "预扣费额度失败,")) {
+		return err
+	}
+	opts := []types.NewAPIErrorOptions{}
+	if types.IsSkipRetryError(err) {
+		opts = append(opts, types.ErrOptionWithSkipRetry())
+	}
+	if !types.IsRecordErrorLog(err) {
+		opts = append(opts, types.ErrOptionWithNoRecordErrorLog())
+	}
+	return types.NewErrorWithStatusCode(err, code, err.StatusCode, opts...)
 }

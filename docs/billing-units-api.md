@@ -278,3 +278,20 @@ RDS MySQL 8.0.36 的 39 张表已通过 `mariadb-dump --single-transaction --qui
 团队在线充值/实际支付宝付款仍未验收，`BILLING_TEAM_TOPUP_ENABLED=false`；NAS/FUSE 故障不在本次发布验收范围。
 
 最终收尾检查：new-api 和 aibrain 的验收会话退出成功，退出后访问各自会话接口返回 401；生产 HTTPS 会话接口要求合法 Origin，验收客户端按真实站点来源发送，未放宽保护。网关、Redis、Casdoor 均健康；网关采样内存约 43 MiB，SSO 主机可用内存约 6.4 GiB。本轮未修改 Casdoor/aibrain 业务代码，费用中心入口为 `https://api.knowyet.com/expenses`。
+
+### 额度不足的处理指引（2026-09-11）
+
+new-api 在原有扣费和备用支付决策完成后细分额度错误，HTTP 状态仍为 403，保留原有禁止重试及日志标记。不新增数据库字段，不修改余额、成员关系或用户的备用支付选择。
+
+| new-api 错误码 | 含义及用户处理 |
+| --- | --- |
+| personal_quota_insufficient | 个人额度不足，进入费用与团队中心补充个人额度 |
+| team_quota_personal_fallback_disabled | 团队额度不足且用户未启用个人备用支付；进入个人中心 → 费用与团队中心，开启“团队额度不足时使用个人余额”，或联系管理员补充团队额度 |
+| team_quota_insufficient | 团队额度不足且平台未开放备用支付；联系团队管理员补充额度，不展示不可用的开关操作 |
+| team_and_personal_quota_insufficient | 团队不足，已尝试个人备用支付但仍不足；补充个人或团队额度 |
+
+账户停用、Token 限制、数据库故障不归为上述错误，也不会因为提示优化而触发个人扣费。额度不足也可能是无法满足本次预扣，不等于余额为零。
+
+发布先升级 known-engine 消费端，再升级 new-api 错误生产端。消费端保留旧 insufficient_user_quota 的兼容提示：提醒检查当前计费团队及备用支付设置，不推断已知账户余额或开关状态。回滚 new-api 后可继续使用兼容提示；历史任务的错误记录不回写。
+
+验证涵盖真实计费会话的四种额度分支、原有团队优先扣费和退款、不允许备用支付的异常；消费端验证错误脱敏、Worker 发布与保存一致、SSE 错误和结束事件保留。aibrain 问答、Agent 任务及构建界面已读取事件 error 字段，无需新增计费状态。
