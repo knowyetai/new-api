@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
+	"os"
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
@@ -211,23 +211,22 @@ func (s *BillingSession) preConsume(c *gin.Context, quota int) *types.NewAPIErro
 			if rollbackErr := model.IncreaseTokenQuota(s.relayInfo.TokenId, s.relayInfo.TokenKey, s.tokenConsumed); rollbackErr != nil {
 				common.SysLog(fmt.Sprintf("error rolling back token quota (userId=%d, tokenId=%d, amount=%d, fundingErr=%s): %s",
 					s.relayInfo.UserId, s.relayInfo.TokenId, s.tokenConsumed, err.Error(), rollbackErr.Error()))
+				return types.NewError(fmt.Errorf("token rollback failed"), types.ErrorCodeUpdateDataError, types.ErrOptionWithSkipRetry())
 			}
 			s.tokenConsumed = 0
 		}
-		// TODO: model 层应定义哨兵错误（如 ErrNoActiveSubscription），用 errors.Is 替代字符串匹配
 		if errors.Is(err, ErrInsufficientWalletQuota) {
 			userQuota, quotaErr := model.GetUserQuota(s.relayInfo.BillingPayerID(), false)
 			if quotaErr != nil {
 				userQuota = 0
 			}
 			return types.NewErrorWithStatusCode(
-				fmt.Errorf("用户额度不足, 剩余额度: %s", logger.FormatQuota(userQuota)),
+				fmt.Errorf("%w: 剩余额度 %s", ErrInsufficientWalletQuota, logger.FormatQuota(userQuota)),
 				types.ErrorCodeInsufficientUserQuota, http.StatusForbidden,
 				types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
 		}
-		errMsg := err.Error()
-		if strings.Contains(errMsg, "no active subscription") || strings.Contains(errMsg, "subscription quota insufficient") {
-			return types.NewErrorWithStatusCode(fmt.Errorf("订阅额度不足或未配置订阅: %s", errMsg), types.ErrorCodeInsufficientUserQuota, http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
+		if errors.Is(err, model.ErrNoActiveSubscription) || errors.Is(err, model.ErrSubscriptionQuotaInsufficient) {
+			return types.NewErrorWithStatusCode(fmt.Errorf("订阅额度不足或未配置订阅: %w", err), types.ErrorCodeInsufficientUserQuota, http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
 		}
 		return types.NewError(err, types.ErrorCodeUpdateDataError, types.ErrOptionWithSkipRetry())
 	}
@@ -296,7 +295,7 @@ func (s *BillingSession) reserveToken(delta int) error {
 // shouldTrust 统一信任额度检查，适用于钱包和订阅。
 func (s *BillingSession) shouldTrust(c *gin.Context) bool {
 	// 异步任务（ForcePreConsume=true）必须预扣全额，不允许信任旁路
-	if s.relayInfo.ForcePreConsume {
+	if s.relayInfo.ForcePreConsume || s.relayInfo.BillingUnitId > 0 {
 		return false
 	}
 
@@ -354,7 +353,7 @@ func (s *BillingSession) syncRelayInfo() {
 // ---------------------------------------------------------------------------
 
 // NewBillingSession 根据用户计费偏好创建 BillingSession，处理 subscription_first / wallet_first 的回退。
-func NewBillingSession(c *gin.Context, relayInfo *relaycommon.RelayInfo, preConsumedQuota int) (*BillingSession, *types.NewAPIError) {
+func newBillingSessionForPayer(c *gin.Context, relayInfo *relaycommon.RelayInfo, preConsumedQuota int) (*BillingSession, *types.NewAPIError) {
 	if relayInfo == nil {
 		return nil, types.NewError(fmt.Errorf("relayInfo is nil"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 	}
@@ -374,13 +373,13 @@ func NewBillingSession(c *gin.Context, relayInfo *relaycommon.RelayInfo, preCons
 		if err != nil {
 			return nil, types.NewError(err, types.ErrorCodeQueryDataError, types.ErrOptionWithSkipRetry())
 		}
-		if userQuota <= 0 {
+		if relayInfo.BillingUnitId == 0 && userQuota <= 0 {
 			return nil, types.NewErrorWithStatusCode(
-				fmt.Errorf("用户额度不足, 剩余额度: %s", logger.FormatQuota(userQuota)),
+				fmt.Errorf("%w: 剩余额度 %s", ErrInsufficientWalletQuota, logger.FormatQuota(userQuota)),
 				types.ErrorCodeInsufficientUserQuota, http.StatusForbidden,
 				types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
 		}
-		if userQuota-preConsumedQuota < 0 {
+		if relayInfo.BillingUnitId == 0 && userQuota-preConsumedQuota < 0 {
 			return nil, types.NewErrorWithStatusCode(
 				fmt.Errorf("预扣费额度失败, 用户剩余额度: %s, 需要预扣费额度: %s", logger.FormatQuota(userQuota), logger.FormatQuota(preConsumedQuota)),
 				types.ErrorCodeInsufficientUserQuota, http.StatusForbidden,
@@ -395,7 +394,11 @@ func NewBillingSession(c *gin.Context, relayInfo *relaycommon.RelayInfo, preCons
 			relayInfo: relayInfo,
 			funding:   &WalletFunding{userId: relayInfo.BillingPayerID()},
 		}
-		if apiErr := session.preConsume(c, preConsumedQuota); apiErr != nil {
+		reserve := preConsumedQuota
+		if relayInfo.BillingUnitId > 0 {
+			reserve = max(1, reserve)
+		}
+		if apiErr := session.preConsume(c, reserve); apiErr != nil {
 			return nil, apiErr
 		}
 		return session, nil
@@ -464,4 +467,36 @@ func NewBillingSession(c *gin.Context, relayInfo *relaycommon.RelayInfo, preCons
 		}
 		return session, nil
 	}
+}
+
+// Personal fallback is a single pre-upstream decision, never a settlement retry.
+func NewBillingSession(c *gin.Context, info *relaycommon.RelayInfo, quota int) (*BillingSession, *types.NewAPIError) {
+	session, apiErr := newBillingSessionForPayer(c, info, quota)
+	if apiErr == nil || info == nil || info.BillingUnitId == 0 || os.Getenv("BILLING_TEAM_PERSONAL_FALLBACK_ENABLED") != "true" {
+		return session, apiErr
+	}
+	if !errors.Is(apiErr, ErrInsufficientWalletQuota) && !errors.Is(apiErr, model.ErrNoActiveSubscription) && !errors.Is(apiErr, model.ErrSubscriptionQuotaInsufficient) {
+		return nil, apiErr
+	}
+	// Read the member's own choice from SQL; cached settings cannot grant spending consent.
+	user, err := model.GetUserById(info.UserId, false)
+	if err != nil {
+		return nil, types.NewError(fmt.Errorf("billing preference unavailable"), types.ErrorCodeQueryDataError, types.ErrOptionWithSkipRetry())
+	}
+	if user.Status != common.UserStatusEnabled || !user.GetSetting().PersonalBillingFallback {
+		return nil, apiErr
+	}
+	candidate := *info
+	candidate.BillingUserId = info.UserId
+	candidate.BillingUnitId = 0
+	candidate.UserSetting = user.GetSetting()
+	session, apiErr = newBillingSessionForPayer(c, &candidate, quota)
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	*info = candidate
+	session.relayInfo = info
+	c.Set("billing_user_id", info.UserId)
+	c.Set("billing_unit_id", 0)
+	return session, nil
 }

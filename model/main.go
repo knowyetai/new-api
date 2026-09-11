@@ -366,6 +366,7 @@ func migrateDB() error {
 		&UserOAuthBinding{},
 		&BillingUnit{},
 		&BillingUnitMember{},
+		&BillingUnitInvitation{},
 		&PerfMetric{},
 		&SystemInstance{},
 		&SystemTask{},

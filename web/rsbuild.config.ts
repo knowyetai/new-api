@@ -82,6 +82,10 @@ export default defineConfig(({ envMode }) => {
       // extracted license files, which some distributions require for open-source compliance.
     },
     performance: {
+      // Large bundle-size reports retain compressed buffers after compilation.
+      // Skip only the report on small build hosts; emitted assets stay identical.
+      printFileSize:
+        process.env.BUILD_LOW_MEMORY === 'true' ? false : undefined,
       // Remove console in production
       removeConsole: isProd ? ['log'] : false,
       buildCache: false,

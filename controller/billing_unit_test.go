@@ -109,10 +109,13 @@ func TestBillingUnitAPIAndSettlement(t *testing.T) {
 			assert.Equal(t, 409, request("POST", "/units", `{"name":"duplicate","owner_user_id":1,"payer_user_id":4}`).Code)
 			role = common.RoleCommonUser
 			assert.Equal(t, 403, request("POST", "/units", `{}`).Code)
+			assert.Equal(t, 403, request("PUT", "/units/1/members/2", "").Code)
+			role = common.RoleAdminUser
 			assert.Equal(t, 200, request("PUT", "/units/1/members/2", "").Code)
 			assert.Equal(t, 200, request("PUT", "/units/1/members/2", "").Code)
 			assert.Equal(t, 409, request("PUT", "/units/1/members/4", "").Code)
 			actor = 5
+			role = common.RoleCommonUser
 			assert.Equal(t, 404, request("GET", "/units/1", "").Code)
 			assert.Equal(t, 404, request("PUT", "/units/1/members/3", "").Code)
 			actor = 1

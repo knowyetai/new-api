@@ -115,6 +115,11 @@ export function ProfileDropdown() {
             </DropdownMenuItem>
           )}
 
+          <DropdownMenuItem onClick={() => navigate({ to: '/expenses' })}>
+            <Wallet className='size-4' />
+            {t('Expenses')}
+          </DropdownMenuItem>
+
           {isWalletVisible && (
             <DropdownMenuItem onClick={() => navigate({ to: '/wallet' })}>
               <Wallet className='size-4' />

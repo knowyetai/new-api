@@ -8,10 +8,11 @@ import (
 )
 
 type BillingUnit struct {
-	Id          int    `json:"id" gorm:"primaryKey"`
-	Name        string `json:"name" gorm:"type:varchar(128)"`
-	OwnerUserId int    `json:"owner_user_id" gorm:"index"`
-	PayerUserId int    `json:"payer_user_id" gorm:"uniqueIndex"`
+	Id          int     `json:"id" gorm:"primaryKey"`
+	Name        string  `json:"name" gorm:"type:varchar(128)"`
+	OwnerUserId int     `json:"owner_user_id" gorm:"index;uniqueIndex:idx_team_creation,priority:1"`
+	CreationKey *string `json:"-" gorm:"type:varchar(80);uniqueIndex:idx_team_creation,priority:2"`
+	PayerUserId int     `json:"payer_user_id" gorm:"uniqueIndex"`
 }
 type BillingUnitMember struct {
 	UserId        int `json:"user_id" gorm:"primaryKey;autoIncrement:false"`

@@ -5,6 +5,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
 	"net/http"
+	"os"
 	"strconv"
 )
 
@@ -79,15 +80,31 @@ func BillingUnitMembers(c *gin.Context) {
 		return
 	}
 	if c.Request.Method == http.MethodGet {
-		members := []model.BillingUnitMember{}
+		type memberItem struct {
+			model.BillingUnitMember
+			Username    string `json:"username"`
+			DisplayName string `json:"display_name"`
+		}
+		members := []memberItem{}
 		page := common.GetPageQuery(c)
 		var total int64
 		query := model.DB.Model(&model.BillingUnitMember{}).Where("billing_unit_id = ?", unit.Id)
-		if query.Count(&total).Error != nil || query.Order("user_id").Offset(page.GetStartIdx()).Limit(page.GetPageSize()).Find(&members).Error != nil {
+		if query.Count(&total).Error != nil || query.Select("user_id, billing_unit_id").Order("user_id").Offset(page.GetStartIdx()).Limit(page.GetPageSize()).Find(&members).Error != nil {
 			c.JSON(503, gin.H{"success": false, "message": "query unavailable"})
 			return
 		}
+		for i := range members {
+			var user model.User
+			if model.DB.Select("id,username,display_name").First(&user, members[i].UserId).Error == nil {
+				members[i].Username = user.Username
+				members[i].DisplayName = user.DisplayName
+			}
+		}
 		common.ApiSuccess(c, gin.H{"items": members, "total": total})
+		return
+	}
+	if c.Request.Method == http.MethodPut && c.GetInt("role") < common.RoleAdminUser {
+		c.JSON(403, gin.H{"success": false, "message": "TEAM_INVITATION_REQUIRED", "code": "TEAM_INVITATION_REQUIRED"})
 		return
 	}
 	uid, err := strconv.Atoi(c.Param("user_id"))
@@ -152,14 +169,27 @@ func SetBillingUnitEnabled(c *gin.Context) {
 	common.ApiSuccess(c, gin.H{"enabled": user.Status == common.UserStatusEnabled})
 }
 func GetMyBillingUnit(c *gin.Context) {
-	unit, err := model.ResolveBillingUnit(c.GetInt("id"))
+	user, err := model.GetUserById(c.GetInt("id"), false)
 	if err != nil {
-		c.JSON(503, gin.H{"success": false, "message": "billing identity unavailable"})
+		teamFailure(c, err)
 		return
 	}
-	if unit == nil {
-		common.ApiSuccess(c, gin.H{"billing_unit_id": nil, "payment_mode": "personal"})
+	unit, err := model.ResolveBillingUnit(user.Id)
+	if err != nil {
+		teamFailure(c, err)
 		return
 	}
-	common.ApiSuccess(c, gin.H{"billing_unit_id": unit.Id, "name": unit.Name, "payment_mode": "unit"})
+	result := gin.H{"billing_unit_id": nil, "payment_mode": "personal", "personal_quota": user.Quota, "personal_billing_fallback": user.GetSetting().PersonalBillingFallback, "self_service_enabled": os.Getenv("BILLING_TEAM_SELF_SERVICE_ENABLED") == "true", "fallback_enabled": os.Getenv("BILLING_TEAM_PERSONAL_FALLBACK_ENABLED") == "true", "topup_enabled": os.Getenv("BILLING_TEAM_TOPUP_ENABLED") == "true"}
+	if unit != nil {
+		var payer model.User
+		if err = model.DB.First(&payer, unit.PayerUserId).Error; err != nil {
+			teamFailure(c, err)
+			return
+		}
+		result["billing_unit_id"] = unit.Id
+		result["name"] = unit.Name
+		result["payment_mode"] = "unit"
+		result["enabled"] = payer.Status == common.UserStatusEnabled
+	}
+	common.ApiSuccess(c, result)
 }
