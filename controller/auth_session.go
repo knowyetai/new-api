@@ -4,15 +4,102 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
+
+const accountSwitchFlowTTL = 5 * time.Minute
+
+func StartAccountSwitch(c *gin.Context) {
+	setAuthNoStore(c)
+	identity, ok := middleware.GetSessionAuthIdentity(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "code": "AUTH_SESSION_REQUIRED", "message": "authentication required"})
+		return
+	}
+	settings := system_setting.GetOIDCSettings()
+	if !settings.Enabled || strings.TrimSpace(settings.ClientId) == "" || strings.TrimSpace(settings.EndSessionEndpoint) == "" || strings.TrimSpace(settings.AuthorizationEndpoint) == "" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "code": "ACCOUNT_SWITCH_UNAVAILABLE", "message": "account switching is unavailable"})
+		return
+	}
+	target, err := url.Parse(settings.EndSessionEndpoint)
+	if err != nil || (target.Scheme != "https" && target.Scheme != "http") || target.Host == "" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "code": "ACCOUNT_SWITCH_UNAVAILABLE", "message": "account switching is unavailable"})
+		return
+	}
+	state, _, err := model.CreateAuthFlow(model.AuthFlowCreate{
+		Purpose:   model.AuthFlowPurposeAccountSwitch,
+		Provider:  "oidc",
+		Intent:    model.AuthFlowIntentLogin,
+		UserId:    identity.UserID,
+		SessionId: identity.SessionID,
+		ExpiresAt: time.Now().Add(accountSwitchFlowTTL),
+	})
+	if err != nil {
+		writeAuthSessionError(c, err)
+		return
+	}
+	callback := strings.TrimRight(system_setting.ServerAddress, "/") + "/api/user/auth/switch-account/callback"
+	query := target.Query()
+	query.Set("client_id", settings.ClientId)
+	query.Set("post_logout_redirect_uri", callback)
+	query.Set("state", state)
+	target.RawQuery = query.Encode()
+	c.JSON(http.StatusOK, gin.H{"redirect_url": target.String()})
+}
+
+func FinishAccountSwitch(c *gin.Context) {
+	setAuthNoStore(c)
+	state := strings.TrimSpace(c.Query("state"))
+	flow, err := model.ConsumeAuthFlow(state, model.AuthFlowMatch{
+		Purpose:  model.AuthFlowPurposeAccountSwitch,
+		Provider: "oidc",
+		Intent:   model.AuthFlowIntentLogin,
+	})
+	if err != nil {
+		c.Redirect(http.StatusSeeOther, "/sign-in?account_switch_error=1")
+		return
+	}
+	if _, err := model.RevokeUserSession(flow.UserId, flow.SessionId, "account_switch"); err != nil {
+		writeAuthSessionError(c, err)
+		return
+	}
+	service.ClearRefreshCookie(c)
+	oauthState, _, err := model.CreateAuthFlow(model.AuthFlowCreate{
+		Purpose:   model.AuthFlowPurposeOAuth,
+		Provider:  "oidc",
+		Intent:    model.AuthFlowIntentLogin,
+		Payload:   "{}",
+		ExpiresAt: time.Now().Add(10 * time.Minute),
+	})
+	if err != nil {
+		writeAuthSessionError(c, err)
+		return
+	}
+	settings := system_setting.GetOIDCSettings()
+	target, err := url.Parse(settings.AuthorizationEndpoint)
+	if err != nil || target.Host == "" {
+		c.Redirect(http.StatusSeeOther, "/sign-in?account_switch_error=1")
+		return
+	}
+	query := target.Query()
+	query.Set("client_id", settings.ClientId)
+	query.Set("redirect_uri", strings.TrimRight(system_setting.ServerAddress, "/")+"/oauth/oidc")
+	query.Set("response_type", "code")
+	query.Set("scope", "openid profile email")
+	query.Set("state", oauthState)
+	target.RawQuery = query.Encode()
+	c.Redirect(http.StatusSeeOther, target.String())
+}
 
 func RefreshAuth(c *gin.Context) {
 	setAuthNoStore(c)

@@ -74,6 +74,8 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			userRoute.POST("/auth/refresh", middleware.SessionCookieOriginGuard(), middleware.CriticalRateLimit(), middleware.DisableCache(), controller.RefreshAuth)
 			userRoute.POST("/auth/logout", middleware.SessionCookieOriginGuard(), middleware.CriticalRateLimit(), middleware.DisableCache(), controller.AuthLogout)
+			userRoute.POST("/auth/switch-account", middleware.SessionCookieOriginGuard(), middleware.UserAuth(), middleware.CriticalRateLimit(), middleware.DisableCache(), controller.StartAccountSwitch)
+			userRoute.GET("/auth/switch-account/callback", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.FinishAccountSwitch)
 			userRoute.POST("/register", middleware.CriticalRateLimit(), anonymousRequestBodyLimit, middleware.TurnstileCheck(), controller.Register)
 			userRoute.GET("/login/encryption-key", middleware.DisableCache(), controller.GetPasswordEncryptionKey)
 			userRoute.POST("/login", middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, middleware.TurnstileCheck(), controller.Login)

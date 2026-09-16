@@ -78,6 +78,7 @@ const oauthSchema = z.object({
     client_secret: z.string(),
     well_known: z.string(),
     authorization_endpoint: z.string(),
+    end_session_endpoint: z.string(),
     token_endpoint: z.string(),
     user_info_endpoint: z.string(),
   }),
@@ -108,6 +109,7 @@ type FlatOAuthDefaults = {
   'oidc.client_secret': string
   'oidc.well_known': string
   'oidc.authorization_endpoint': string
+  'oidc.end_session_endpoint': string
   'oidc.token_endpoint': string
   'oidc.user_info_endpoint': string
   TelegramOAuthEnabled: boolean
@@ -191,6 +193,7 @@ const buildFormDefaults = (defaults: FlatOAuthDefaults): OAuthFormValues => ({
     client_secret: defaults['oidc.client_secret'] ?? '',
     well_known: defaults['oidc.well_known'] ?? '',
     authorization_endpoint: defaults['oidc.authorization_endpoint'] ?? '',
+    end_session_endpoint: defaults['oidc.end_session_endpoint'] ?? '',
     token_endpoint: defaults['oidc.token_endpoint'] ?? '',
     user_info_endpoint: defaults['oidc.user_info_endpoint'] ?? '',
   },
@@ -222,6 +225,7 @@ const normalizeFormValues = (values: OAuthFormValues): FlatOAuthDefaults => ({
   'oidc.client_secret': values.oidc.client_secret,
   'oidc.well_known': values.oidc.well_known,
   'oidc.authorization_endpoint': values.oidc.authorization_endpoint,
+  'oidc.end_session_endpoint': values.oidc.end_session_endpoint,
   'oidc.token_endpoint': values.oidc.token_endpoint,
   'oidc.user_info_endpoint': values.oidc.user_info_endpoint,
   'telegram.client_id': values.telegram.client_id,
@@ -312,6 +316,7 @@ export function OAuthSection(props: OAuthSectionProps) {
       try {
         const res = await axios.create().get(wellKnown)
         const authEndpoint = res.data['authorization_endpoint'] || ''
+        const endSessionEndpoint = res.data['end_session_endpoint'] || ''
         const tokenEndpoint = res.data['token_endpoint'] || ''
         const userInfoEndpoint = res.data['userinfo_endpoint'] || ''
 
@@ -320,12 +325,14 @@ export function OAuthSection(props: OAuthSectionProps) {
           oidc: {
             ...values.oidc,
             authorization_endpoint: authEndpoint,
+            end_session_endpoint: endSessionEndpoint,
             token_endpoint: tokenEndpoint,
             user_info_endpoint: userInfoEndpoint,
           },
         }
 
         form.setValue('oidc.authorization_endpoint', authEndpoint)
+        form.setValue('oidc.end_session_endpoint', endSessionEndpoint)
         form.setValue('oidc.token_endpoint', tokenEndpoint)
         form.setValue('oidc.user_info_endpoint', userInfoEndpoint)
 
@@ -777,6 +784,33 @@ export function OAuthSection(props: OAuthSectionProps) {
                           ref={field.ref}
                         />
                       </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <FormField
+                  control={form.control}
+                  name='oidc.end_session_endpoint'
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>{t('End Session Endpoint')}</FormLabel>
+                      <FormControl>
+                        <Input
+                          placeholder={t('Override auto-discovered endpoint')}
+                          autoComplete='off'
+                          value={field.value ?? ''}
+                          onChange={(event) =>
+                            field.onChange(event.target.value)
+                          }
+                          name={field.name}
+                          onBlur={field.onBlur}
+                          ref={field.ref}
+                        />
+                      </FormControl>
+                      <FormDescription>
+                        {t('Used by the shared account switching flow')}
+                      </FormDescription>
                       <FormMessage />
                     </FormItem>
                   )}

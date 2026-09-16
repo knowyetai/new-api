@@ -13,6 +13,7 @@ type OIDCSettings struct {
 	ClientSecret          string `json:"client_secret"`
 	WellKnown             string `json:"well_known"`
 	AuthorizationEndpoint string `json:"authorization_endpoint"`
+	EndSessionEndpoint    string `json:"end_session_endpoint"`
 	TokenEndpoint         string `json:"token_endpoint"`
 	UserInfoEndpoint      string `json:"user_info_endpoint"`
 }

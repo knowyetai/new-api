@@ -17,8 +17,15 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useNavigate } from '@tanstack/react-router'
-import { User, Wallet, LogOut, Settings, ShieldCheck } from 'lucide-react'
-import { useMemo } from 'react'
+import {
+  User,
+  Wallet,
+  LogOut,
+  Settings,
+  ShieldCheck,
+  Repeat2,
+} from 'lucide-react'
+import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { SignOutDialog } from '@/components/sign-out-dialog'
@@ -31,10 +38,12 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { switchAccount } from '@/features/auth/account-switch'
 import useDialogState from '@/hooks/use-dialog'
 import { useIsSidebarModuleVisible } from '@/hooks/use-sidebar-config'
 import { useUserDisplay } from '@/hooks/use-user-display'
 import { getUserAvatarFallback, getUserAvatarStyle } from '@/lib/avatar'
+import { handleServerError } from '@/lib/handle-server-error'
 import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -44,6 +53,7 @@ export function ProfileDropdown() {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const [open, setOpen] = useDialogState()
+  const [isSwitching, setIsSwitching] = useState(false)
   const user = useAuthStore((state) => state.auth.user)
   const { displayName, roleLabel } = useUserDisplay(user)
   const isSuperAdmin = user?.role === ROLE.SUPER_ADMIN
@@ -137,6 +147,23 @@ export function ProfileDropdown() {
           )}
 
           <DropdownMenuSeparator />
+
+          <DropdownMenuItem
+            disabled={isSwitching}
+            onClick={async () => {
+              if (isSwitching) return
+              setIsSwitching(true)
+              try {
+                await switchAccount()
+              } catch (error: unknown) {
+                setIsSwitching(false)
+                handleServerError(error, t('Failed to switch account'))
+              }
+            }}
+          >
+            <Repeat2 className='size-4' />
+            {t('Switch account')}
+          </DropdownMenuItem>
 
           <DropdownMenuItem variant='destructive' onClick={() => setOpen(true)}>
             <LogOut className='size-4' />
