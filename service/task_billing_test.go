@@ -1744,3 +1744,63 @@ func TestSettle_TokenRecalcFallsBackToCompletionTokens(t *testing.T) {
 		})
 	}
 }
+
+func TestAsyncTeamBillingRetainsPayerAfterReload(t *testing.T) {
+	truncate(t)
+	seedUser(t, 1, 50)
+	require.NoError(t, model.DB.Create(&model.User{Id: 2, Username: "team_payer", AffCode: "payer", Quota: 1000, Status: common.UserStatusEnabled}).Error)
+	seedChannel(t, 1)
+	info := &relaycommon.RelayInfo{UserId: 1, BillingUserId: 2, BillingUnitId: 7, ChannelMeta: &relaycommon.ChannelMeta{ChannelId: 1}}
+	task := model.InitTask("test", info)
+	task.ChannelId = 1
+	task.Quota = 100
+	task.PrivateData.BillingSource = BillingSourceWallet
+	require.NoError(t, model.DB.Create(task).Error)
+	var restored model.Task
+	require.NoError(t, model.DB.First(&restored, task.ID).Error)
+	require.Equal(t, 2, restored.BillingPayerID())
+	require.NoError(t, taskAdjustFunding(&restored, 100))
+	seedChargedAccounting(t, 1, 1, 0, 100, 1)
+	require.NoError(t, model.DB.Model(&model.User{}).Where("id = ?", 2).Update("used_quota", 100).Error)
+	require.True(t, RefundTaskQuota(context.Background(), &restored, "upstream failed"))
+	var actor, payer model.User
+	require.NoError(t, model.DB.First(&actor, 1).Error)
+	require.NoError(t, model.DB.First(&payer, 2).Error)
+	assert.Equal(t, 50, actor.Quota)
+	assert.Equal(t, 1000, payer.Quota)
+	var log model.Log
+	require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeRefund).Last(&log).Error)
+	assert.Equal(t, 1, log.UserId)
+	assert.Equal(t, 2, log.BillingUserId)
+	assert.Equal(t, 7, log.BillingUnitId)
+	assert.Equal(t, 1, (&model.Task{UserId: 1}).BillingPayerID())
+}
+
+func TestMidjourneyTeamRefundRetainsPayerAfterReload(t *testing.T) {
+	truncate(t)
+	seedUser(t, 1, 50)
+	require.NoError(t, model.DB.Create(&model.User{Id: 2, Username: "mj_team_payer", AffCode: "mj_payer", Quota: 1000, Status: common.UserStatusEnabled}).Error)
+	seedChannel(t, 1)
+	info := &relaycommon.RelayInfo{UserId: 1, BillingUserId: 2, BillingUnitId: 9, IsPlayground: true}
+	task := &model.Midjourney{UserId: 1, ChannelId: 1, MjId: "team-refund", Action: "IMAGINE"}
+	prepared, err := PrepareMidjourneyTaskBilling(info, task, 100, true)
+	require.NoError(t, err)
+	require.NoError(t, task.Insert())
+	billed, err := SettleMidjourneyTaskBilling(info, task, prepared)
+	require.NoError(t, err)
+	require.True(t, billed)
+	assert.Equal(t, 900, getUserQuota(t, 2))
+	persisted := getMidjourneyTask(t, task.Id)
+	require.Equal(t, 2, persisted.BillingPayerID())
+	seedChargedAccounting(t, 1, 1, 0, 100, 1)
+	require.NoError(t, model.DB.Model(&model.User{}).Where("id = ?", 2).Update("used_quota", 100).Error)
+	require.True(t, RefundMidjourneyQuota(context.Background(), &persisted, "failed"))
+	assert.Equal(t, 1000, getUserQuota(t, 2))
+	assert.Equal(t, 50, getUserQuota(t, 1))
+	log := getLastLog(t)
+	require.NotNil(t, log)
+	assert.Equal(t, 2, log.BillingUserId)
+	assert.Equal(t, 9, log.BillingUnitId)
+	require.True(t, RefundMidjourneyQuota(context.Background(), &persisted, "duplicate"))
+	assert.Equal(t, 1000, getUserQuota(t, 2))
+}

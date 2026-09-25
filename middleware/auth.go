@@ -470,12 +470,7 @@ func TokenAuth() func(c *gin.Context) {
 			return
 		}
 		if unit != nil {
-			// First rollout supports chat completions only. Never silently use a
-			// personal wallet on an unadapted realtime or asynchronous path.
-			if c.Request.URL.Path != "/v1/chat/completions" {
-				abortWithOpenAiMessage(c, http.StatusForbidden, "billing unit endpoint not supported")
-				return
-			}
+			// Resolve funding independently of the model protocol or endpoint.
 			payer, err := model.GetUserCache(unit.PayerUserId)
 			if err != nil || payer.Status != common.UserStatusEnabled {
 				abortWithOpenAiMessage(c, http.StatusForbidden, "billing account unavailable")

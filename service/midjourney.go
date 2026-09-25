@@ -52,6 +52,8 @@ func PrepareMidjourneyTaskBilling(relayInfo *relaycommon.RelayInfo, task *model.
 		return false, errors.New("legacy Midjourney billing does not support subscriptions")
 	}
 
+	task.BillingUserId = relayInfo.BillingPayerID()
+	task.BillingUnitId = relayInfo.BillingUnitId
 	task.Quota = quota
 	task.BillingChannelId = task.ChannelId
 	if relayInfo.ChannelMeta != nil && relayInfo.ChannelId > 0 {
@@ -100,7 +102,7 @@ func RefundMidjourneyQuota(ctx context.Context, task *model.Midjourney, reason s
 		return true
 	}
 
-	if err := model.IncreaseUserQuota(task.UserId, quota, false); err != nil {
+	if err := model.IncreaseUserQuota(task.BillingPayerID(), quota, false); err != nil {
 		logger.LogWarn(ctx, fmt.Sprintf("退还 Midjourney 用户额度失败 task %s: %s", task.MjId, err.Error()))
 		return false
 	}
@@ -116,11 +118,15 @@ func RefundMidjourneyQuota(ctx context.Context, task *model.Midjourney, reason s
 
 	billingChannelId := task.GetBillingChannelId()
 	model.UpdateUserUsedQuota(task.UserId, -quota)
+	if task.BillingUnitId > 0 {
+		model.UpdateUserUsedQuota(task.BillingPayerID(), -quota)
+	}
 	model.UpdateChannelUsedQuota(billingChannelId, -quota)
 	other := model.NewLogOther()
 	other.SetPublic("task_id", task.MjId)
 	other.SetPublic("reason", reason)
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
+		BillingUserId: task.BillingPayerID(), BillingUnitId: task.BillingUnitId,
 		UserId:    task.UserId,
 		LogType:   model.LogTypeRefund,
 		Content:   "",

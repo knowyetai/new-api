@@ -211,7 +211,7 @@ func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyR
 		}
 	}
 
-	userQuota, err := model.GetUserQuota(info.UserId, false)
+	userQuota, err := model.GetUserQuota(info.BillingPayerID(), false)
 	if err != nil {
 		return &dto.MidjourneyResponse{
 			Code:        4,
@@ -284,6 +284,9 @@ func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyR
 			Other:     other,
 		})
 		model.UpdateUserUsedQuotaAndRequestCount(info.UserId, midjourneyTask.Quota)
+		if info.BillingUnitId > 0 {
+			model.UpdateUserUsedQuotaAndRequestCount(info.BillingPayerID(), midjourneyTask.Quota)
+		}
 		model.UpdateChannelUsedQuota(billingChannelId, midjourneyTask.Quota)
 	}
 	c.Writer.WriteHeader(mjResp.StatusCode)
@@ -524,7 +527,7 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 		}
 	}
 
-	userQuota, err := model.GetUserQuota(relayInfo.UserId, false)
+	userQuota, err := model.GetUserQuota(relayInfo.BillingPayerID(), false)
 	if err != nil {
 		return &dto.MidjourneyResponse{
 			Code:        4,
@@ -649,6 +652,9 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 			Other:     other,
 		})
 		model.UpdateUserUsedQuotaAndRequestCount(relayInfo.UserId, midjourneyTask.Quota)
+		if relayInfo.BillingUnitId > 0 {
+			model.UpdateUserUsedQuotaAndRequestCount(relayInfo.BillingPayerID(), midjourneyTask.Quota)
+		}
 		model.UpdateChannelUsedQuota(billingChannelId, midjourneyTask.Quota)
 	}
 

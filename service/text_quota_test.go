@@ -141,7 +141,7 @@ func runFixedPriceAccountingCases(t *testing.T, db *gorm.DB) {
 			apiErr := PreConsumeBilling(ctx, reservation, info)
 			if tc.insufficient {
 				require.NotNil(t, apiErr)
-				assert.Equal(t, types.ErrorCodeInsufficientUserQuota, apiErr.GetErrorCode())
+				assert.Equal(t, types.ErrorCode("personal_quota_insufficient"), apiErr.GetErrorCode())
 			} else {
 				require.Nil(t, apiErr)
 				held, err := model.GetUserQuota(user.Id, true)

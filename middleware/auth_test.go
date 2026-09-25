@@ -12,6 +12,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
@@ -254,4 +255,67 @@ func TestTryUserAuthCredentialClassification(t *testing.T) {
 	router.ServeHTTP(databaseFailureResponse, databaseFailureRequest)
 	assert.Equal(t, http.StatusInternalServerError, databaseFailureResponse.Code)
 	assert.Contains(t, databaseFailureResponse.Body.String(), "AUTH_INTERNAL_ERROR")
+}
+
+func TestTeamBillingIdentityIndependentOfEndpoint(t *testing.T) {
+	setupDashboardAuthMiddlewareTest(t)
+	oldPath, oldMaster, oldBatch := common.SQLitePath, common.IsMasterNode, common.BatchUpdateEnabled
+	common.SQLitePath, common.IsMasterNode, common.BatchUpdateEnabled = t.TempDir()+"/billing.db", false, false
+	t.Cleanup(func() {
+		common.SQLitePath, common.IsMasterNode, common.BatchUpdateEnabled = oldPath, oldMaster, oldBatch
+	})
+	t.Setenv("SQL_DSN", "local")
+	t.Setenv("LOG_SQL_DSN", "")
+	require.NoError(t, model.InitDB())
+	db, err := model.DB.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	require.NoError(t, model.DB.AutoMigrate(&model.User{}))
+	require.NoError(t, model.DB.AutoMigrate(&model.Token{}, &model.BillingUnit{}, &model.BillingUnitMember{}, &model.UserSubscription{}, &model.SubscriptionPlan{}, &model.SubscriptionPreConsumeRecord{}))
+	for _, u := range []model.User{{Id: 501, Username: "team-consumer", AffCode: "consumer", Status: common.UserStatusEnabled}, {Id: 502, Username: "team-payer", AffCode: "payer", Quota: 10000, Status: common.UserStatusEnabled}} {
+		require.NoError(t, model.DB.Create(&u).Error)
+	}
+	require.NoError(t, model.DB.Create(&model.BillingUnit{Id: 1, OwnerUserId: 501, PayerUserId: 502}).Error)
+	require.NoError(t, model.DB.Create(&model.BillingUnitMember{UserId: 501, BillingUnitId: 1}).Error)
+	token := model.Token{UserId: 501, Key: "teamendpointregression", Status: common.TokenStatusEnabled, UnlimitedQuota: true, ExpiredTime: -1}
+	require.NoError(t, model.DB.Create(&token).Error)
+	for _, path := range []string{"/v1/embeddings", "/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/images/generations", "/v1/audio/transcriptions", "/v1/realtime", "/v1/videos", "/v1/future-protocol"} {
+		t.Run(path, func(t *testing.T) {
+			router := gin.New()
+			router.Use(TokenAuth())
+			router.Any(path, func(c *gin.Context) {
+				assert.Equal(t, 501, c.GetInt("id"))
+				assert.Equal(t, 502, c.GetInt("billing_user_id"))
+				assert.Equal(t, 1, c.GetInt("billing_unit_id"))
+				info := &relaycommon.RelayInfo{UserId: c.GetInt("id"), BillingUserId: c.GetInt("billing_user_id"), BillingUnitId: c.GetInt("billing_unit_id"), TokenId: token.Id, TokenKey: token.Key, TokenUnlimited: true, RequestId: path, ForcePreConsume: true}
+				session, apiErr := service.NewBillingSession(c, info, 20)
+				require.Nil(t, apiErr)
+				require.NoError(t, session.Settle(7))
+				require.NoError(t, session.Settle(7))
+				c.Status(http.StatusNoContent)
+			})
+			req := httptest.NewRequest(http.MethodPost, path, nil)
+			req.Header.Set("Authorization", "Bearer sk-"+token.Key)
+			res := httptest.NewRecorder()
+			router.ServeHTTP(res, req)
+			require.Equal(t, http.StatusNoContent, res.Code, res.Body.String())
+		})
+	}
+	var actor, payer model.User
+	require.NoError(t, model.DB.First(&actor, 501).Error)
+	require.NoError(t, model.DB.First(&payer, 502).Error)
+	assert.Zero(t, actor.Quota)
+	assert.Equal(t, 10000-9*7, payer.Quota)
+	// Removing protocol restrictions must not bypass payer-account validity.
+	require.NoError(t, model.DB.Model(&model.User{}).Where("id = ?", 502).Update("status", common.UserStatusDisabled).Error)
+	router := gin.New()
+	router.Use(TokenAuth())
+	router.POST("/v1/embeddings", func(c *gin.Context) { t.Error("disabled payer reached upstream"); c.Status(http.StatusNoContent) })
+	req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", nil)
+	req.Header.Set("Authorization", "Bearer sk-"+token.Key)
+	res := httptest.NewRecorder()
+	router.ServeHTTP(res, req)
+	assert.Equal(t, http.StatusForbidden, res.Code)
+	assert.Contains(t, res.Body.String(), "billing account unavailable")
+
 }
