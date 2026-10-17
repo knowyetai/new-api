@@ -62,6 +62,12 @@ import { safeNumberFieldProps } from '../utils/numeric-field'
 import { AmountDiscountVisualEditor } from './amount-discount-visual-editor'
 import { AmountOptionsVisualEditor } from './amount-options-visual-editor'
 import { CreemProductsVisualEditor } from './creem-products-visual-editor'
+import {
+  buildLianlianSettingsUpdates,
+  isValidLianlianGateway,
+  type LianlianSettingsValues,
+} from './lianlian-settings'
+import { LianlianSettingsSection } from './lianlian-settings-section'
 import { PaymentMethodsVisualEditor } from './payment-methods-visual-editor'
 import {
   formatJsonForEditor,
@@ -177,13 +183,30 @@ const paymentSchema = z.object({
   WaffoPancakeMerchantID: z.string(),
   WaffoPancakePrivateKey: z.string(),
   WaffoPancakeReturnURL: z.string(),
+  LianlianEnabled: z.boolean(),
+  LianlianEnv: z.string(),
+  LianlianGateway: z.string().superRefine((value, ctx) => {
+    if (!isValidLianlianGateway(value)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'LianLian gateway must end with /mch, e.g. https://openapi.lianlianpay.com/mch',
+      })
+    }
+  }),
+  LianlianMchId: z.string(),
+  LianlianPrivateKey: z.string(),
+  LianlianPlatformPublicCert: z.string(),
+  LianlianBusiType: z.string(),
 })
 
 type PaymentFormValues = z.infer<typeof paymentSchema>
 type WaffoFormFieldValues = Omit<WaffoSettingsValues, 'WaffoPayMethods'>
 type PaymentBaseFormValues = Omit<
   PaymentFormValues,
-  keyof WaffoFormFieldValues | keyof WaffoPancakeSettingsValues
+  | keyof WaffoFormFieldValues
+  | keyof WaffoPancakeSettingsValues
+  | keyof LianlianSettingsValues
 >
 
 const CURRENT_COMPLIANCE_TERMS_VERSION = 'v1'
@@ -200,6 +223,7 @@ type PaymentSettingsSectionProps = {
   defaultValues: PaymentBaseFormValues
   waffoDefaultValues: WaffoSettingsValues
   waffoPancakeDefaultValues: WaffoPancakeSettingsValues
+  lianlianDefaultValues: LianlianSettingsValues
   waffoPancakeProvisionedStoreID?: string
   waffoPancakeProvisionedProductID?: string
   complianceDefaults: PaymentComplianceDefaults
@@ -218,6 +242,7 @@ export function PaymentSettingsSection({
   defaultValues,
   waffoDefaultValues,
   waffoPancakeDefaultValues,
+  lianlianDefaultValues,
   waffoPancakeProvisionedStoreID,
   waffoPancakeProvisionedProductID,
   complianceDefaults,
@@ -230,8 +255,14 @@ export function PaymentSettingsSection({
       ...defaultValues,
       ...waffoDefaultValues,
       ...waffoPancakeDefaultValues,
+      ...lianlianDefaultValues,
     }),
-    [defaultValues, waffoDefaultValues, waffoPancakeDefaultValues]
+    [
+      defaultValues,
+      waffoDefaultValues,
+      waffoPancakeDefaultValues,
+      lianlianDefaultValues,
+    ]
   )
   const initialRef = React.useRef(initialFormValues)
   const defaultsSignature = React.useMemo(
@@ -396,6 +427,19 @@ export function PaymentSettingsSection({
     <K extends keyof WaffoPancakeSettingsValues>(
       key: K,
       value: WaffoPancakeSettingsValues[K]
+    ) => {
+      setPaymentValue(
+        key as keyof PaymentFormValues,
+        value as PaymentFormValues[keyof PaymentFormValues]
+      )
+    },
+    [setPaymentValue]
+  )
+
+  const setLianlianValue = React.useCallback(
+    <K extends keyof LianlianSettingsValues>(
+      key: K,
+      value: LianlianSettingsValues[K]
     ) => {
       setPaymentValue(
         key as keyof PaymentFormValues,
@@ -702,6 +746,8 @@ export function PaymentSettingsSection({
       updates.push({ key: 'WaffoPayMethods', value: sanitized.WaffoPayMethods })
     }
 
+    updates.push(...buildLianlianSettingsUpdates(values, initialRef.current))
+
     const hasWaffoPancakeChanges =
       sanitized.WaffoPancakeMerchantID !== initial.WaffoPancakeMerchantID ||
       sanitized.WaffoPancakePrivateKey.length > 0 ||
@@ -797,6 +843,15 @@ export function PaymentSettingsSection({
     WaffoPancakePrivateKey: currentFormValues.WaffoPancakePrivateKey,
     WaffoPancakeReturnURL: currentFormValues.WaffoPancakeReturnURL,
   }
+  const lianlianValues: LianlianSettingsValues = {
+    LianlianEnabled: currentFormValues.LianlianEnabled,
+    LianlianEnv: currentFormValues.LianlianEnv,
+    LianlianGateway: currentFormValues.LianlianGateway,
+    LianlianMchId: currentFormValues.LianlianMchId,
+    LianlianPrivateKey: currentFormValues.LianlianPrivateKey,
+    LianlianPlatformPublicCert: currentFormValues.LianlianPlatformPublicCert,
+    LianlianBusiType: currentFormValues.LianlianBusiType,
+  }
 
   return (
     <SettingsSection title={t('Payment Gateway')}>
@@ -879,11 +934,12 @@ export function PaymentSettingsSection({
           />
           <Tabs defaultValue='general' className='min-w-0'>
             <div className='overflow-x-auto pb-1'>
-              <TabsList className='grid min-w-[44rem] grid-cols-6'>
+              <TabsList className='grid min-w-[52rem] grid-cols-7'>
                 <TabsTrigger value='general'>{t('General')}</TabsTrigger>
                 <TabsTrigger value='epay'>Epay</TabsTrigger>
                 <TabsTrigger value='stripe'>{t('Stripe')}</TabsTrigger>
                 <TabsTrigger value='creem'>Creem</TabsTrigger>
+                <TabsTrigger value='lianlian'>LianLian</TabsTrigger>
                 <TabsTrigger value='waffo-pancake'>Waffo Pancake</TabsTrigger>
                 <TabsTrigger value='waffo'>Waffo</TabsTrigger>
               </TabsList>
@@ -1604,6 +1660,16 @@ export function PaymentSettingsSection({
                   )}
                 />
               </div>
+            </TabsContent>
+
+            <TabsContent
+              value='lianlian'
+              className={paymentTabContentClassName}
+            >
+              <LianlianSettingsSection
+                values={lianlianValues}
+                onValueChange={setLianlianValue}
+              />
             </TabsContent>
 
             <TabsContent

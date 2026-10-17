@@ -108,3 +108,24 @@ func isEpayWebhookConfigured() bool {
 func isEpayWebhookEnabled() bool {
 	return isEpayTopUpEnabled()
 }
+
+// isLianlianTopUpEnabled 只有合规确认、启用开关、商户号与私钥齐全时才允许
+// 创建连连订单；回调验签使用内置或管理员配置的平台公钥，因此不作为前置条件。
+func isLianlianTopUpEnabled() bool {
+	if !isPaymentComplianceConfirmed() {
+		return false
+	}
+	return setting.LianlianEnabled &&
+		strings.TrimSpace(setting.LianlianMchId) != "" &&
+		strings.TrimSpace(setting.LianlianPrivateKey) != ""
+}
+
+func isLianlianWebhookEnabled() bool {
+	return strings.TrimSpace(setting.LianlianMchId) != "" &&
+		strings.TrimSpace(setting.GetLianlianPlatformPublicKey()) != ""
+}
+
+func isLianlianQueryEnabled() bool {
+	return strings.TrimSpace(setting.LianlianMchId) != "" &&
+		strings.TrimSpace(setting.LianlianPrivateKey) != ""
+}

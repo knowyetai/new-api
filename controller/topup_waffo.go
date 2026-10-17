@@ -224,6 +224,7 @@ func RequestWaffoPay(c *gin.Context) {
 	topUp := &model.TopUp{
 		UserId:          id,
 		Amount:          amount,
+		AmountUnit:      model.AmountUnitUSD,
 		Money:           payMoney,
 		TradeNo:         merchantOrderId,
 		PaymentMethod:   model.PaymentMethodWaffo,

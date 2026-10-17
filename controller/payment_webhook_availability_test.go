@@ -167,3 +167,40 @@ func TestEpayWebhookEnabledRequiresTopUpAndWebhookConfig(t *testing.T) {
 	operation_setting.PayMethods = nil
 	require.False(t, isEpayWebhookEnabled())
 }
+
+func TestLianlianWebhookEnabledTracksSettlementConfig(t *testing.T) {
+	confirmPaymentComplianceForTest(t)
+	originalEnabled := setting.LianlianEnabled
+	originalMchID := setting.LianlianMchId
+	originalPrivateKey := setting.LianlianPrivateKey
+	originalPublicKey := setting.LianlianPlatformPublicCert
+	t.Cleanup(func() {
+		setting.LianlianEnabled = originalEnabled
+		setting.LianlianMchId = originalMchID
+		setting.LianlianPrivateKey = originalPrivateKey
+		setting.LianlianPlatformPublicCert = originalPublicKey
+	})
+
+	setting.LianlianEnabled = true
+	setting.LianlianMchId = "   "
+	setting.LianlianPrivateKey = ""
+	require.False(t, isLianlianWebhookEnabled())
+	require.False(t, isLianlianQueryEnabled())
+
+	setting.LianlianMchId = "2020042200284052"
+	require.True(t, isLianlianWebhookEnabled())
+	require.False(t, isLianlianQueryEnabled())
+
+	setting.LianlianPrivateKey = "-----BEGIN RSA PRIVATE KEY-----"
+	require.True(t, isLianlianWebhookEnabled())
+	require.True(t, isLianlianQueryEnabled())
+
+	setting.LianlianEnabled = false
+	require.True(t, isLianlianWebhookEnabled())
+	require.True(t, isLianlianQueryEnabled())
+
+	setting.LianlianEnabled = true
+	setting.LianlianMchId = "   "
+	require.False(t, isLianlianWebhookEnabled())
+	require.False(t, isLianlianQueryEnabled())
+}

@@ -176,6 +176,15 @@ const BILLING_SECTIONS = [
           WaffoPancakePrivateKey: settings.WaffoPancakePrivateKey ?? '',
           WaffoPancakeReturnURL: settings.WaffoPancakeReturnURL ?? '',
         }}
+        lianlianDefaultValues={{
+          LianlianEnabled: settings.LianlianEnabled ?? false,
+          LianlianEnv: settings.LianlianEnv ?? 'test',
+          LianlianGateway: settings.LianlianGateway ?? '',
+          LianlianMchId: settings.LianlianMchId ?? '',
+          LianlianPrivateKey: settings.LianlianPrivateKey ?? '',
+          LianlianPlatformPublicCert: settings.LianlianPlatformPublicCert ?? '',
+          LianlianBusiType: settings.LianlianBusiType ?? '100001',
+        }}
         waffoPancakeProvisionedStoreID={settings.WaffoPancakeStoreID ?? ''}
         waffoPancakeProvisionedProductID={settings.WaffoPancakeProductID ?? ''}
         complianceDefaults={{
