@@ -132,6 +132,7 @@ func InitOptionMap() {
 	common.OptionMap["LianlianPrivateKey"] = setting.LianlianPrivateKey
 	common.OptionMap["LianlianPlatformPublicCert"] = setting.LianlianPlatformPublicCert
 	common.OptionMap["LianlianBusiType"] = setting.LianlianBusiType
+	common.OptionMap["LianlianRiskCategory"] = setting.LianlianRiskCategory
 	common.OptionMap["TopupGroupRatio"] = common.TopupGroupRatio2JSONString()
 	common.OptionMap["Chats"] = setting.Chats2JsonString()
 	common.OptionMap["AutoGroups"] = setting.AutoGroups2JsonString()
@@ -537,6 +538,8 @@ func updateOptionMap(key string, value string) (err error) {
 		setting.LianlianPlatformPublicCert = value
 	case "LianlianBusiType":
 		setting.LianlianBusiType = value
+	case "LianlianRiskCategory":
+		setting.LianlianRiskCategory = value
 	case "TopupGroupRatio":
 		err = common.UpdateTopupGroupRatioByJSONString(value)
 	case "GitHubClientId":

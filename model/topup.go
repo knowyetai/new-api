@@ -21,7 +21,7 @@ type TopUp struct {
 	UserId            int        `json:"user_id" gorm:"index;uniqueIndex:idx_top_ups_user_lianlian_request_id,priority:1"`
 	Amount            int64      `json:"amount"`
 	AmountUnit        AmountUnit `json:"amount_unit" gorm:"type:varchar(16);default:''"`
-	Money             float64    `json:"money"` // Lianlian payment money is stored in AmountUnit, currently CNY cents.
+	Money             float64    `json:"money"` // Lianlian stores payable money in CNY cents; API responses use yuan.
 	ProviderTradeNo   string     `json:"provider_trade_no" gorm:"type:varchar(128);default:''"`
 	LianlianRequestID *string    `json:"-" gorm:"type:varchar(64);uniqueIndex:idx_top_ups_user_lianlian_request_id,priority:2"`
 	LianlianQRCode    string     `json:"-" gorm:"type:text"`
@@ -243,6 +243,18 @@ func (topUp *TopUp) Quota() (int, error) {
 	return common.WalletQuotaFromDecimalStrict(quota)
 }
 
+// PayableMoney returns Money in the public top-up record contract. Lianlian
+// stores exact cents internally, while callers expect an actual money amount.
+func (topUp *TopUp) PayableMoney() float64 {
+	if topUp == nil {
+		return 0
+	}
+	if topUp.PaymentProvider == PaymentProviderLianlian {
+		return topUp.Money / float64(amountMinorUnitScale)
+	}
+	return topUp.Money
+}
+
 // UpdateTopUpProviderTradeNo records an upstream transaction number without
 // overwriting payment state. A callback may complete the order while the
 // create-payment response is still in flight.
@@ -250,6 +262,9 @@ func UpdateTopUpProviderTradeNo(tradeNo string, providerTradeNo string) error {
 	providerTradeNo = strings.TrimSpace(providerTradeNo)
 	if tradeNo == "" || providerTradeNo == "" {
 		return nil
+	}
+	if len(providerTradeNo) > 128 {
+		return ErrLianlianProviderTradeNoInvalid
 	}
 	result := DB.Model(&TopUp{}).
 		Where("trade_no = ? AND (provider_trade_no = '' OR provider_trade_no = ?)", tradeNo, providerTradeNo).
@@ -460,6 +475,8 @@ func RechargeEpay(tradeNo string, actualPaymentMethod string, callerIp string, p
 var (
 	// ErrLianlianAmountMismatch 表示连连回调金额与订单金额不一致，拒绝入账。
 	ErrLianlianAmountMismatch = errors.New("lianlian payment amount mismatch")
+	// ErrLianlianProviderTradeNoInvalid 表示连连成功结果缺少合法的上游流水号。
+	ErrLianlianProviderTradeNoInvalid = errors.New("lianlian provider trade number invalid")
 	// ErrLianlianProviderTradeNoMismatch 表示同一商户订单对应了不同的上游流水号。
 	ErrLianlianProviderTradeNoMismatch = errors.New("lianlian provider trade number mismatch")
 )
@@ -497,18 +514,16 @@ func RechargeLianlian(tradeNo string, actualPaymentMethod string, callerIp strin
 		}
 
 		providerTradeNo = strings.TrimSpace(providerTradeNo)
-		if providerTradeNo != "" {
-			if len(providerTradeNo) > 128 ||
-				(topUp.ProviderTradeNo != "" && topUp.ProviderTradeNo != providerTradeNo) {
-				return ErrLianlianProviderTradeNoMismatch
-			}
-			topUp.ProviderTradeNo = providerTradeNo
+		if providerTradeNo == "" || len(providerTradeNo) > 128 {
+			return ErrLianlianProviderTradeNoInvalid
 		}
+		if topUp.ProviderTradeNo != "" && topUp.ProviderTradeNo != providerTradeNo {
+			return ErrLianlianProviderTradeNoMismatch
+		}
+		topUp.ProviderTradeNo = providerTradeNo
 		if topUp.Status == common.TopUpStatusSuccess {
-			if providerTradeNo != "" {
-				if err := tx.Model(topUp).Update("provider_trade_no", providerTradeNo).Error; err != nil {
-					return err
-				}
+			if err := tx.Model(topUp).Update("provider_trade_no", providerTradeNo).Error; err != nil {
+				return err
 			}
 			alreadyDone = true
 			return nil
@@ -538,6 +553,7 @@ func RechargeLianlian(tradeNo string, actualPaymentMethod string, callerIp strin
 			!errors.Is(err, ErrPaymentMethodMismatch) &&
 			!errors.Is(err, ErrTopUpStatusInvalid) &&
 			!errors.Is(err, ErrLianlianAmountMismatch) &&
+			!errors.Is(err, ErrLianlianProviderTradeNoInvalid) &&
 			!errors.Is(err, ErrLianlianProviderTradeNoMismatch) {
 			common.SysError("lianlian topup failed: " + err.Error())
 		}

@@ -148,6 +148,7 @@ func topUpResponses(topUps []*model.TopUp) []*model.TopUp {
 	for _, topUp := range topUps {
 		response := *topUp
 		response.AmountUnit = topUp.EffectiveAmountUnit()
+		response.Money = topUp.PayableMoney()
 		responses = append(responses, &response)
 	}
 	return responses

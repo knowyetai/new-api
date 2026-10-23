@@ -128,6 +128,14 @@ func TestTopUpQuotaRespectsAmountUnitAndLegacySemantics(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidAmountExchangeRate)
 }
 
+func TestTopUpPayableMoneyUsesPublicMoneyUnits(t *testing.T) {
+	lianlian := &TopUp{Money: 1050, PaymentProvider: PaymentProviderLianlian}
+	assert.InDelta(t, 10.5, lianlian.PayableMoney(), 1e-9)
+
+	legacy := &TopUp{Money: 10.5, PaymentProvider: PaymentProviderEpay}
+	assert.InDelta(t, 10.5, legacy.PayableMoney(), 1e-9)
+}
+
 func TestRechargeWaffoPancake_RejectsMismatchedPaymentMethod(t *testing.T) {
 	truncateTables(t)
 

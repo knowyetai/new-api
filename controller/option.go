@@ -124,6 +124,10 @@ func GetOptions(c *gin.Context) {
 		Key:   "CompletionRatioMeta",
 		Value: buildCompletionRatioMetaValue(optionValues),
 	})
+	options = append(options, &model.Option{
+		Key:   "LianlianPrivateKeyConfigured",
+		Value: strconv.FormatBool(strings.TrimSpace(setting.LianlianPrivateKey) != ""),
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -167,6 +171,10 @@ func UpdateOption(c *gin.Context) {
 			common.ApiErrorMsg(c, "合规确认字段不允许通过通用设置接口修改")
 			return
 		}
+	}
+	if strings.HasPrefix(option.Key, "Lianlian") {
+		common.ApiErrorMsg(c, "连连支付配置必须通过专用保存接口修改")
+		return
 	}
 	if option.Key == "TaskPublicAddress" && option.Value.(string) != "" {
 		if err := service.ValidateTaskArtifactBaseURL(option.Value.(string)); err != nil {

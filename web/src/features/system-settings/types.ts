@@ -339,8 +339,11 @@ export type BillingSettings = {
   LianlianGateway: string
   LianlianMchId: string
   LianlianPrivateKey: string
+  LianlianPrivateKeyConfigured: boolean
+  LianlianClearPrivateKey: boolean
   LianlianPlatformPublicCert: string
   LianlianBusiType: string
+  LianlianRiskCategory: string
   'checkin_setting.enabled': boolean
   'checkin_setting.min_quota': number
   'checkin_setting.max_quota': number

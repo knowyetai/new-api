@@ -13,20 +13,24 @@ import (
 // CreatePayRequest 是构造收单创单报文所需的钱包侧数据。
 type CreatePayRequest struct {
 	// Env 决定默认网关（test/prod），Gateway 非空时优先使用 Gateway。
-	Env        string
-	Gateway    string
-	PrivateKey string
-	MerchantID string
-	BusiType   string
-	UserID     string
-	TradeNo    string
-	Money      string
-	GoodsName  string
-	NotifyURL  string
-	ClientIP   string
-	DeviceID   string
-	PayMethod  string
-	Timestamp  string
+	Env          string
+	Gateway      string
+	PrivateKey   string
+	MerchantID   string
+	BusiType     string
+	UserID       string
+	Username     string
+	UserEmail    string
+	Registered   string
+	RiskCategory string
+	TradeNo      string
+	Money        string
+	GoodsName    string
+	NotifyURL    string
+	ClientIP     string
+	DeviceID     string
+	PayMethod    string
+	Timestamp    string
 }
 
 // SignedRequest 是可以直接发送的创单请求：报文与签名一一对应，调用方不得
@@ -181,11 +185,17 @@ func BuildCreatePayBody(req CreatePayRequest) (map[string]any, error) {
 	}
 	deviceID := strings.TrimSpace(req.DeviceID)
 	if deviceID == "" {
-		deviceID = DefaultDeviceID
+		deviceID = DefaultDeviceIDPrefix + userID
 	}
+	deviceID = truncate(deviceID, 64)
 	deviceIP := strings.TrimPrefix(strings.TrimSpace(req.ClientIP), "::ffff:")
 	if deviceIP == "" {
 		deviceIP = "127.0.0.1"
+	}
+
+	riskCategory := strings.TrimSpace(req.RiskCategory)
+	if riskCategory == "" {
+		riskCategory = DefaultRiskCategory
 	}
 
 	return map[string]any{
@@ -198,7 +208,14 @@ func BuildCreatePayBody(req CreatePayRequest) (map[string]any, error) {
 		"order_info":   truncate(goodsName, 255),
 		"pay_expire":   PayExpireMinutes,
 		"notify_url":   notifyURL,
-		"risk_item":    RiskItem(userID, strings.TrimSpace(req.ClientIP)),
+		"risk_item": RiskItem(RiskItemParams{
+			Category:     riskCategory,
+			UserID:       userID,
+			Username:     req.Username,
+			Email:        req.UserEmail,
+			ClientIP:     req.ClientIP,
+			RegisteredAt: req.Registered,
+		}),
 		"pay_method_infos": []map[string]any{
 			{"pay_type": payType, "amount": money},
 		},
@@ -218,18 +235,32 @@ func BuildCreatePayBody(req CreatePayRequest) (map[string]any, error) {
 	}, nil
 }
 
+// RiskItemParams contains the user attributes accepted by Lianlian risk control.
+type RiskItemParams struct {
+	Category     string
+	UserID       string
+	Username     string
+	Email        string
+	ClientIP     string
+	RegisteredAt string
+}
+
 // RiskItem 生成连连风控参数（JSON 字符串）。字段与官方示例一致，多余字段会
 // 触发渠道侧异常。
-func RiskItem(userID string, clientIP string) string {
-	clientIP = strings.TrimPrefix(strings.TrimSpace(clientIP), "::ffff:")
+func RiskItem(params RiskItemParams) string {
+	clientIP := strings.TrimPrefix(strings.TrimSpace(params.ClientIP), "::ffff:")
+	category := strings.TrimSpace(params.Category)
+	if category == "" {
+		category = DefaultRiskCategory
+	}
 	risk := map[string]any{
-		"frms_ware_category":         "1002",
-		"user_info_mercht_userno":    userID,
-		"user_info_mercht_userlogin": "",
-		"user_info_mail":             "",
+		"frms_ware_category":         category,
+		"user_info_mercht_userno":    strings.TrimSpace(params.UserID),
+		"user_info_mercht_userlogin": strings.TrimSpace(params.Username),
+		"user_info_mail":             strings.TrimSpace(params.Email),
 		"user_info_bind_phone":       "",
 		"user_info_mercht_usertype":  "",
-		"user_info_dt_registe":       "20180206143300",
+		"user_info_dt_registe":       strings.TrimSpace(params.RegisteredAt),
 		"user_info_register_ip":      clientIP,
 		"user_info_full_name":        "",
 		"user_info_id_type":          "0",

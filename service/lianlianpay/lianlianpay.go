@@ -55,6 +55,8 @@ const (
 
 	// DefaultBusiType 是默认业务类型（普通收款）。
 	DefaultBusiType = "100001"
+	// DefaultRiskCategory 是官方文档示例中的通用商品类目，管理员应按商户实际配置覆盖。
+	DefaultRiskCategory = "1002"
 
 	// RetCodeSuccess 表示连连受理成功。
 	RetCodeSuccess = "0000"
@@ -63,8 +65,8 @@ const (
 	// RetCodeOrderNotFound 表示查询不到原订单。
 	RetCodeOrderNotFound = "4001"
 
-	// DefaultDeviceID 是 PC 扫码场景的设备标识。
-	DefaultDeviceID = "new-api"
+	// DefaultDeviceIDPrefix 为未显式传入设备号时生成用户级稳定标识。
+	DefaultDeviceIDPrefix = "new-api-user-"
 
 	// TimeoutSeconds 是调用连连下单接口的超时时间（秒）。
 	TimeoutSeconds = 15
@@ -254,6 +256,18 @@ func Verify(publicKeyPEM string, body []byte, signature string) (bool, error) {
 		return false, nil
 	}
 	return true, nil
+}
+
+// ValidatePrivateKeyPEM checks that a merchant signing key can be parsed.
+func ValidatePrivateKeyPEM(privateKeyPEM string) error {
+	_, err := parsePrivateKey(privateKeyPEM)
+	return err
+}
+
+// ValidatePublicKeyPEM checks that a platform verification key can be parsed.
+func ValidatePublicKeyPEM(publicKeyPEM string) error {
+	_, err := parsePublicKey(publicKeyPEM)
+	return err
 }
 
 func parsePrivateKey(privateKeyPEM string) (*rsa.PrivateKey, error) {

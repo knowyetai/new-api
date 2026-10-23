@@ -311,11 +311,7 @@ func GetTeamTopups(c *gin.Context) {
 		teamFailure(c, err)
 		return
 	}
-	items := make([]*model.TopUp, 0, len(rows))
-	for i := range rows {
-		items = append(items, &rows[i])
-	}
-	common.ApiSuccess(c, gin.H{"items": topUpResponses(items), "total": total})
+	common.ApiSuccess(c, gin.H{"items": rows, "total": total})
 }
 
 func QuoteTeamEpay(c *gin.Context) {

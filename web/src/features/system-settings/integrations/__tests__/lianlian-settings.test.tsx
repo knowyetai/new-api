@@ -25,7 +25,7 @@ import { describe, expect, it } from 'vitest'
 import { Form } from '@/components/ui/form'
 
 import {
-  buildLianlianSettingsUpdates,
+  buildLianlianSettingsRequest,
   isValidLianlianGateway,
   type LianlianSettingsValues,
 } from '../lianlian-settings'
@@ -37,8 +37,11 @@ const initialValues: LianlianSettingsValues = {
   LianlianGateway: '',
   LianlianMchId: 'merchant',
   LianlianPrivateKey: '',
+  LianlianPrivateKeyConfigured: true,
+  LianlianClearPrivateKey: false,
   LianlianPlatformPublicCert: '',
   LianlianBusiType: '100001',
+  LianlianRiskCategory: '1002',
 }
 
 function SettingsFixture() {
@@ -74,6 +77,20 @@ describe('Lianlian settings', () => {
     expect(privateKey).toHaveValue('private-key')
   })
 
+  it('shows the stored-key state and lets the operator clear it', async () => {
+    render(<SettingsFixture />)
+    const user = userEvent.setup()
+
+    expect(
+      screen.getByText('A merchant private key is already stored.')
+    ).toBeInTheDocument()
+    const clearKey = screen.getByRole('checkbox', {
+      name: 'Clear the stored merchant private key',
+    })
+    await user.click(clearKey)
+    expect(clearKey).toBeChecked()
+  })
+
   it('validates gateway URLs without rejecting the official default', () => {
     expect(isValidLianlianGateway('')).toBe(true)
     expect(isValidLianlianGateway('https://gateway.example/mch/')).toBe(true)
@@ -84,20 +101,19 @@ describe('Lianlian settings', () => {
   })
 
   it('keeps the stored private key when the write-only field is blank', () => {
-    expect(buildLianlianSettingsUpdates(initialValues, initialValues)).toEqual(
-      []
-    )
+    expect(buildLianlianSettingsRequest(initialValues, initialValues)).toBeNull()
   })
 
   it('normalizes changes and allows clearing the public key', () => {
     expect(
-      buildLianlianSettingsUpdates(
+      buildLianlianSettingsRequest(
         {
           ...initialValues,
           LianlianEnabled: true,
           LianlianEnv: 'prod',
           LianlianGateway: 'https://gateway.example/mch/',
           LianlianBusiType: '',
+          LianlianRiskCategory: '2001',
           LianlianPrivateKey: ' private-key ',
           LianlianPlatformPublicCert: ' public-key ',
         },
@@ -106,25 +122,51 @@ describe('Lianlian settings', () => {
           LianlianPlatformPublicCert: 'old-public-key',
         }
       )
-    ).toEqual([
-      { key: 'LianlianEnabled', value: true },
-      { key: 'LianlianEnv', value: 'prod' },
-      {
-        key: 'LianlianGateway',
-        value: 'https://gateway.example/mch',
-      },
-      { key: 'LianlianPlatformPublicCert', value: 'public-key' },
-      { key: 'LianlianPrivateKey', value: 'private-key' },
-    ])
+    ).toEqual({
+      enabled: true,
+      env: 'prod',
+      gateway: 'https://gateway.example/mch',
+      merchant_id: 'merchant',
+      private_key: 'private-key',
+      platform_public_key: 'public-key',
+      busi_type: '100001',
+      risk_category: '2001',
+      clear_private_key: false,
+    })
 
     expect(
-      buildLianlianSettingsUpdates(
+      buildLianlianSettingsRequest(
         { ...initialValues, LianlianPlatformPublicCert: '' },
         {
           ...initialValues,
           LianlianPlatformPublicCert: 'old-public-key',
         }
       )
-    ).toEqual([{ key: 'LianlianPlatformPublicCert', value: '' }])
+    ).toEqual({
+      enabled: false,
+      env: 'test',
+      gateway: '',
+      merchant_id: 'merchant',
+      private_key: '',
+      platform_public_key: '',
+      busi_type: '100001',
+      risk_category: '1002',
+      clear_private_key: false,
+    })
+  })
+
+  it('can explicitly clear a stored private key', () => {
+    expect(
+      buildLianlianSettingsRequest(
+        {
+          ...initialValues,
+          LianlianClearPrivateKey: true,
+        },
+        initialValues
+      )
+    ).toMatchObject({
+      private_key: '',
+      clear_private_key: true,
+    })
   })
 })

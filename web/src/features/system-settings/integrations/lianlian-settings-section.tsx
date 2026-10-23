@@ -1,4 +1,3 @@
-import { useFormContext } from 'react-hook-form'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -18,7 +17,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useTranslation } from 'react-i18next'
+import { useFormContext } from 'react-hook-form'
 
+import { Checkbox } from '@/components/ui/checkbox'
 import {
   FormControl,
   FormDescription,
@@ -28,6 +29,7 @@ import {
   FormMessage,
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import {
   Select,
   SelectContent,
@@ -45,6 +47,7 @@ import {
 } from '../components/settings-form-layout'
 import {
   DEFAULT_LIANLIAN_BUSI_TYPE,
+  DEFAULT_LIANLIAN_RISK_CATEGORY,
   type LianlianSettingsValues,
 } from './lianlian-settings'
 
@@ -115,7 +118,7 @@ export function LianlianSettingsSection(props: LianlianSettingsSectionProps) {
         )}
       />
 
-      <div className='grid gap-6 md:grid-cols-2'>
+      <div className='grid gap-6 md:grid-cols-3'>
         <FormField
           control={control}
           name='LianlianEnv'
@@ -172,6 +175,34 @@ export function LianlianSettingsSection(props: LianlianSettingsSectionProps) {
               <FormDescription>
                 {t(
                   'LianLian busi_type, leave blank for the default ordinary acquiring (100001)'
+                )}
+              </FormDescription>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+
+        <FormField
+          control={control}
+          name='LianlianRiskCategory'
+          render={() => (
+            <FormItem>
+              <FormLabel>{t('Risk category')}</FormLabel>
+              <FormControl>
+                <Input
+                  placeholder={DEFAULT_LIANLIAN_RISK_CATEGORY}
+                  value={props.values.LianlianRiskCategory}
+                  onChange={(event) =>
+                    props.onValueChange(
+                      'LianlianRiskCategory',
+                      event.target.value
+                    )
+                  }
+                />
+              </FormControl>
+              <FormDescription>
+                {t(
+                  'LianLian frms_ware_category assigned to the merchant account'
                 )}
               </FormDescription>
               <FormMessage />
@@ -242,12 +273,15 @@ export function LianlianSettingsSection(props: LianlianSettingsSectionProps) {
                   autoComplete='new-password'
                   className='font-mono text-xs'
                   value={props.values.LianlianPrivateKey}
-                  onChange={(event) =>
+                  onChange={(event) => {
                     props.onValueChange(
                       'LianlianPrivateKey',
                       event.target.value
                     )
-                  }
+                    if (event.target.value) {
+                      props.onValueChange('LianlianClearPrivateKey', false)
+                    }
+                  }}
                 />
               </FormControl>
               <FormDescription>
@@ -256,6 +290,35 @@ export function LianlianSettingsSection(props: LianlianSettingsSectionProps) {
                 )}
               </FormDescription>
               <FormMessage />
+              <div className='space-y-2 rounded-md border p-3'>
+                <p className='text-muted-foreground text-sm'>
+                  {props.values.LianlianPrivateKeyConfigured
+                    ? t('A merchant private key is already stored.')
+                    : t('No merchant private key is stored.')}
+                </p>
+                {props.values.LianlianPrivateKeyConfigured ? (
+                  <div className='flex items-start gap-3'>
+                    <Checkbox
+                      id='lianlian-clear-private-key'
+                      checked={props.values.LianlianClearPrivateKey}
+                      disabled={Boolean(props.values.LianlianPrivateKey.trim())}
+                      onCheckedChange={(checked) => {
+                        const clear = checked === true
+                        props.onValueChange('LianlianClearPrivateKey', clear)
+                        if (clear) {
+                          props.onValueChange('LianlianPrivateKey', '')
+                        }
+                      }}
+                    />
+                    <Label
+                      htmlFor='lianlian-clear-private-key'
+                      className='text-sm leading-5 font-normal'
+                    >
+                      {t('Clear the stored merchant private key')}
+                    </Label>
+                  </div>
+                ) : null}
+              </div>
             </FormItem>
           )}
         />

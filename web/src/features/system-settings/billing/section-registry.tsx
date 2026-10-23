@@ -182,8 +182,12 @@ const BILLING_SECTIONS = [
           LianlianGateway: settings.LianlianGateway ?? '',
           LianlianMchId: settings.LianlianMchId ?? '',
           LianlianPrivateKey: settings.LianlianPrivateKey ?? '',
+          LianlianPrivateKeyConfigured:
+            settings.LianlianPrivateKeyConfigured ?? false,
+          LianlianClearPrivateKey: false,
           LianlianPlatformPublicCert: settings.LianlianPlatformPublicCert ?? '',
           LianlianBusiType: settings.LianlianBusiType ?? '100001',
+          LianlianRiskCategory: settings.LianlianRiskCategory ?? '1002',
         }}
         waffoPancakeProvisionedStoreID={settings.WaffoPancakeStoreID ?? ''}
         waffoPancakeProvisionedProductID={settings.WaffoPancakeProductID ?? ''}

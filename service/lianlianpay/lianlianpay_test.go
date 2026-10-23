@@ -139,15 +139,19 @@ func TestPayTypeMap(t *testing.T) {
 
 func TestBuildCreatePayBody(t *testing.T) {
 	body, err := BuildCreatePayBody(CreatePayRequest{
-		MerchantID: "2020042200284052",
-		UserID:     "42",
-		TradeNo:    "USR42NOabcdef1234567890",
-		Money:      "1.00",
-		GoodsName:  "TUC10",
-		NotifyURL:  "https://api.example.com/api/user/lianlian/notify",
-		PayMethod:  "alipay",
-		ClientIP:   "1.2.3.4",
-		Timestamp:  "20260101120000",
+		MerchantID:   "2020042200284052",
+		UserID:       "42",
+		Username:     "alice",
+		UserEmail:    "alice@example.com",
+		Registered:   "20260101120000",
+		RiskCategory: "2001",
+		TradeNo:      "USR42NOabcdef1234567890",
+		Money:        "1.00",
+		GoodsName:    "TUC10",
+		NotifyURL:    "https://api.example.com/api/user/lianlian/notify",
+		PayMethod:    "alipay",
+		ClientIP:     "1.2.3.4",
+		Timestamp:    "20260101120000",
 	})
 	require.NoError(t, err)
 
@@ -166,10 +170,14 @@ func TestBuildCreatePayBody(t *testing.T) {
 		"goods_quantity": "1",
 		"goods_price":    "1.00",
 	}}, body["goods_info"])
-	assert.Equal(t, map[string]any{"device_id": DefaultDeviceID, "device_type": "PC", "device_ip": "1.2.3.4"}, body["device_info"])
+	assert.Equal(t, map[string]any{"device_id": DefaultDeviceIDPrefix + "42", "device_type": "PC", "device_ip": "1.2.3.4"}, body["device_info"])
 	assert.NotContains(t, body, "payee_infos")
 	assert.Contains(t, body["risk_item"], "frms_ware_category")
 	assert.Contains(t, body["risk_item"], `"user_info_mercht_userno":"42"`)
+	assert.Contains(t, body["risk_item"], `"frms_ware_category":"2001"`)
+	assert.Contains(t, body["risk_item"], `"user_info_mercht_userlogin":"alice"`)
+	assert.Contains(t, body["risk_item"], `"user_info_mail":"alice@example.com"`)
+	assert.Contains(t, body["risk_item"], `"user_info_dt_registe":"20260101120000"`)
 }
 
 func TestBuildCreatePayBodyMapsWxpayAndIPV6Loopback(t *testing.T) {

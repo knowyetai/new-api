@@ -20,6 +20,8 @@ var (
 	LianlianPlatformPublicCert string
 	// LianlianBusiType 是业务类型，默认普通收款 100001。
 	LianlianBusiType = lianlianpay.DefaultBusiType
+	// LianlianRiskCategory 是连连为商户配置的商品类目编码。
+	LianlianRiskCategory = lianlianpay.DefaultRiskCategory
 )
 
 // GetLianlianPlatformPublicKey 返回生效的连连平台公钥：管理员配置优先。

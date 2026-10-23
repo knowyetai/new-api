@@ -280,20 +280,28 @@ func RequestLianlianPay(c *gin.Context) {
 		return
 	}
 
+	registeredAt := ""
+	if user.CreatedAt > 0 {
+		registeredAt = lianlianpay.FormatTimestamp(time.Unix(user.CreatedAt, 0))
+	}
 	signed, err := lianlianpay.BuildCreatePayRequest(lianlianpay.CreatePayRequest{
-		Env:        setting.LianlianEnv,
-		Gateway:    setting.LianlianGateway,
-		PrivateKey: setting.LianlianPrivateKey,
-		MerchantID: setting.LianlianMchId,
-		BusiType:   setting.LianlianBusiType,
-		UserID:     strconv.Itoa(id),
-		TradeNo:    tradeNo,
-		Money:      moneyCNY.StringFixed(2),
-		GoodsName:  fmt.Sprintf("NewAPI 充值 %s", moneyCNY.StringFixed(2)),
-		NotifyURL:  notifyURL,
-		ClientIP:   c.ClientIP(),
-		PayMethod:  req.PaymentMethod,
-		Timestamp:  lianlianpay.NowTimestamp(),
+		Env:          setting.LianlianEnv,
+		Gateway:      setting.LianlianGateway,
+		PrivateKey:   setting.LianlianPrivateKey,
+		MerchantID:   setting.LianlianMchId,
+		BusiType:     setting.LianlianBusiType,
+		UserID:       strconv.Itoa(id),
+		Username:     user.Username,
+		UserEmail:    user.Email,
+		Registered:   registeredAt,
+		RiskCategory: setting.LianlianRiskCategory,
+		TradeNo:      tradeNo,
+		Money:        moneyCNY.StringFixed(2),
+		GoodsName:    fmt.Sprintf("NewAPI 充值 %s", moneyCNY.StringFixed(2)),
+		NotifyURL:    notifyURL,
+		ClientIP:     c.ClientIP(),
+		PayMethod:    req.PaymentMethod,
+		Timestamp:    lianlianpay.NowTimestamp(),
 	})
 	if err != nil {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("连连 构造下单报文失败 user_id=%d trade_no=%s error=%q", id, tradeNo, err.Error()))
@@ -311,10 +319,6 @@ func RequestLianlianPay(c *gin.Context) {
 	}
 
 	providerTradeNo := strings.TrimSpace(result.PlatformTxNo)
-	if len(providerTradeNo) > 128 {
-		logger.LogWarn(c.Request.Context(), fmt.Sprintf("连连 上游订单号超长已忽略 trade_no=%s provider_trade_no=%q", tradeNo, providerTradeNo))
-		providerTradeNo = ""
-	}
 	result.QRCode = strings.TrimSpace(result.QRCode)
 	if err := model.UpdateLianlianPaymentResult(tradeNo, providerTradeNo, result.QRCode); err != nil {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("连连 保存可重试支付信息失败 trade_no=%s provider_trade_no=%s error=%q", tradeNo, providerTradeNo, err.Error()))
@@ -384,7 +388,7 @@ func writeLianlianOrderResponse(c *gin.Context, topUp *model.TopUp) {
 			"payable_amount_cents":   int64(topUp.Money),
 			"payable_amount_unit":    model.AmountUnitCNYCent,
 			// Retained for clients developed against the first revision.
-			"money":       topUp.Money,
+			"money":       topUp.PayableMoney(),
 			"amount":      topUp.Amount,
 			"amount_unit": topUp.EffectiveAmountUnit(),
 			"create_time": topUp.CreateTime,
@@ -402,10 +406,12 @@ func createLianlianPayment(c *gin.Context, signed *lianlianpay.SignedRequest, ex
 	if err != nil {
 		return result, err
 	}
+	providerTradeNo := strings.TrimSpace(result.PlatformTxNo)
 	responseAmount, amountErr := decimal.NewFromString(strings.TrimSpace(result.OrderAmount))
 	if strings.TrimSpace(result.MchID) != strings.TrimSpace(setting.LianlianMchId) ||
 		strings.TrimSpace(result.TxnSeqno) != expectedTradeNo ||
-		strings.TrimSpace(result.PlatformTxNo) == "" ||
+		providerTradeNo == "" ||
+		len(providerTradeNo) > 128 ||
 		amountErr != nil ||
 		!responseAmount.Shift(2).Equal(decimal.NewFromInt(expectedMoneyCents)) {
 		return result, errors.New("连连接口应答与本地订单不一致")
@@ -555,7 +561,7 @@ func GetLianlianOrder(c *gin.Context) {
 				}
 				return ""
 			}(),
-			"money":       topUp.Money,
+			"money":       topUp.PayableMoney(),
 			"amount":      topUp.Amount,
 			"amount_unit": topUp.EffectiveAmountUnit(),
 			"create_time": topUp.CreateTime,
@@ -704,6 +710,8 @@ func LianlianNotify(c *gin.Context) {
 			logger.LogWarn(ctx, fmt.Sprintf("连连 订单状态非法 trade_no=%s client_ip=%s", tradeNo, c.ClientIP()))
 		case errors.Is(err, model.ErrLianlianAmountMismatch):
 			logger.LogError(ctx, fmt.Sprintf("连连 回调金额与订单不一致 trade_no=%s paid=%s client_ip=%s", tradeNo, notify.PaidAmount(), c.ClientIP()))
+		case errors.Is(err, model.ErrLianlianProviderTradeNoInvalid):
+			logger.LogWarn(ctx, fmt.Sprintf("连连 回调缺少有效上游订单号 trade_no=%s client_ip=%s", tradeNo, c.ClientIP()))
 		case errors.Is(err, model.ErrLianlianProviderTradeNoMismatch):
 			logger.LogWarn(ctx, fmt.Sprintf("连连 上游订单号不一致 trade_no=%s provider_trade_no=%s client_ip=%s", tradeNo, notify.ProviderTradeNo(), c.ClientIP()))
 		default:

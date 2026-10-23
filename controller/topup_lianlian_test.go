@@ -79,7 +79,7 @@ func newLianlianTestEnv(t *testing.T, gatewayResponse string) *lianlianTestEnv {
 	require.NoError(t, err)
 	logDB, err := gorm.Open(sqlite.Open(filepath.Join(dir, "log.db")), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.TopUp{}))
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.TopUp{}, &model.Option{}))
 	require.NoError(t, logDB.AutoMigrate(&model.Log{}))
 	model.DB, model.LOG_DB = db, logDB
 	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
@@ -96,11 +96,13 @@ func newLianlianTestEnv(t *testing.T, gatewayResponse string) *lianlianTestEnv {
 	})
 
 	require.NoError(t, db.Create(&model.User{
-		Id:       lianlianTestUserID,
-		Username: "lianlian_topup_user",
-		AffCode:  "lianlian-topup-aff",
-		Quota:    1000,
-		Status:   common.UserStatusEnabled,
+		Id:        lianlianTestUserID,
+		Username:  "lianlian_topup_user",
+		Email:     "lianlian@example.test",
+		AffCode:   "lianlian-topup-aff",
+		Quota:     1000,
+		Status:    common.UserStatusEnabled,
+		CreatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).Unix(),
 	}).Error)
 
 	env := &lianlianTestEnv{
@@ -152,6 +154,7 @@ func newLianlianTestEnv(t *testing.T, gatewayResponse string) *lianlianTestEnv {
 	oldPrivateKey := setting.LianlianPrivateKey
 	oldPublicCert := setting.LianlianPlatformPublicCert
 	oldBusiType := setting.LianlianBusiType
+	oldRiskCategory := setting.LianlianRiskCategory
 	oldMinTopUp := operation_setting.MinTopUp
 	oldCallback := operation_setting.CustomCallbackAddress
 	oldPrice := operation_setting.Price
@@ -166,6 +169,7 @@ func newLianlianTestEnv(t *testing.T, gatewayResponse string) *lianlianTestEnv {
 		setting.LianlianPrivateKey = oldPrivateKey
 		setting.LianlianPlatformPublicCert = oldPublicCert
 		setting.LianlianBusiType = oldBusiType
+		setting.LianlianRiskCategory = oldRiskCategory
 		operation_setting.MinTopUp = oldMinTopUp
 		operation_setting.CustomCallbackAddress = oldCallback
 		operation_setting.Price = oldPrice
@@ -181,6 +185,7 @@ func newLianlianTestEnv(t *testing.T, gatewayResponse string) *lianlianTestEnv {
 	setting.LianlianPrivateKey = merchantPriv
 	setting.LianlianPlatformPublicCert = platformPub
 	setting.LianlianBusiType = lianlianpay.DefaultBusiType
+	setting.LianlianRiskCategory = lianlianpay.DefaultRiskCategory
 	operation_setting.MinTopUp = 1
 	operation_setting.CustomCallbackAddress = "https://api.example.test"
 	operation_setting.Price = 7.3
@@ -201,6 +206,9 @@ func lianlianTestRouter(userId int) *gin.Engine {
 	router.GET("/lianlian/order/:tradeNo", GetLianlianOrder)
 	router.POST("/lianlian/order/:tradeNo/cancel", CancelLianlianOrder)
 	router.GET("/topup/info", GetTopUpInfo)
+	router.GET("/option", GetOptions)
+	router.PUT("/option", UpdateOption)
+	router.POST("/option/lianlian/save", SaveLianlianSettings)
 	return router
 }
 
@@ -282,7 +290,7 @@ func TestRequestLianlianPayCreatesOrderAndQRCode(t *testing.T) {
 	}
 	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
 	require.NotEmpty(t, response.Data.TradeNo)
-	assert.InDelta(t, 1000, response.Data.Money, 1e-9)
+	assert.InDelta(t, 10, response.Data.Money, 1e-9)
 	assert.Equal(t, int64(1000), response.Data.Amount)
 	assert.Equal(t, "CNY_CENT", response.Data.AmountUnit)
 	assert.Equal(t, int64(1000), response.Data.RequestedAmountCents)
@@ -313,6 +321,15 @@ func TestRequestLianlianPayCreatesOrderAndQRCode(t *testing.T) {
 	assert.Contains(t, string(env.lastBody), `"pay_expire":15`)
 	assert.Contains(t, string(env.lastBody), `"pay_type":"ALIPAY_NATIVE"`)
 	assert.Contains(t, string(env.lastBody), `"notify_url":"https://api.example.test/api/user/lianlian/notify"`)
+	var createRequest struct {
+		RiskItem   string            `json:"risk_item"`
+		DeviceInfo map[string]string `json:"device_info"`
+	}
+	require.NoError(t, common.Unmarshal(env.lastBody, &createRequest))
+	assert.Equal(t, "new-api-user-77", createRequest.DeviceInfo["device_id"])
+	assert.Contains(t, createRequest.RiskItem, `"user_info_mercht_userlogin":"lianlian_topup_user"`)
+	assert.Contains(t, createRequest.RiskItem, `"user_info_mail":"lianlian@example.test"`)
+	assert.Contains(t, createRequest.RiskItem, `"user_info_dt_registe":"20260102110405"`)
 
 	query := httptest.NewRecorder()
 	router.ServeHTTP(query, httptest.NewRequest(http.MethodGet, "/lianlian/order/"+response.Data.TradeNo, nil))
@@ -320,6 +337,7 @@ func TestRequestLianlianPayCreatesOrderAndQRCode(t *testing.T) {
 	assert.Contains(t, query.Body.String(), `"provider_trade_no":"LL20261016001"`)
 	assert.Contains(t, query.Body.String(), `"amount":1000`)
 	assert.Contains(t, query.Body.String(), `"amount_unit":"CNY_CENT"`)
+	assert.Contains(t, query.Body.String(), `"money":10`)
 	assert.NotContains(t, query.Body.String(), "money_cents")
 }
 
@@ -434,6 +452,10 @@ func TestRequestLianlianPayRejectsMismatchedGatewayOrder(t *testing.T) {
 			name:     "amount",
 			response: `{"ret_code":"0000","ret_msg":"交易成功","payload":"https://qr.alipay.com/bax1","mch_id":"2020042200284052","platform_txno":"LL20261016001","txn_seqno":"{{trade_no}}","order_amount":"9.99"}`,
 		},
+		{
+			name:     "provider trade number",
+			response: fmt.Sprintf(`{"ret_code":"0000","ret_msg":"交易成功","payload":"https://qr.alipay.com/bax1","mch_id":"2020042200284052","platform_txno":%q,"txn_seqno":"{{trade_no}}","order_amount":"{{order_amount}}"}`, strings.Repeat("x", 129)),
+		},
 	}
 
 	for _, tc := range testCases {
@@ -464,8 +486,8 @@ func TestLianlianUsesCNYAmountWhenQuotaDisplayIsTokens(t *testing.T) {
 
 func TestTopUpResponsesExposeEffectiveAmountUnit(t *testing.T) {
 	encoded, err := common.Marshal(gin.H{"items": topUpResponses([]*model.TopUp{
-		{Amount: 1050, PaymentProvider: model.PaymentProviderLianlian},
-		{Amount: 1, AmountUnit: model.AmountUnitCNYCent, PaymentProvider: model.PaymentProviderLianlian},
+		{Amount: 1050, Money: 1050, PaymentProvider: model.PaymentProviderLianlian},
+		{Amount: 1, Money: 1, AmountUnit: model.AmountUnitCNYCent, PaymentProvider: model.PaymentProviderLianlian},
 		{Amount: 10, PaymentProvider: model.PaymentProviderEpay},
 	})})
 	require.NoError(t, err)
@@ -474,6 +496,7 @@ func TestTopUpResponsesExposeEffectiveAmountUnit(t *testing.T) {
 		Items []struct {
 			Amount          int64            `json:"amount"`
 			AmountUnit      model.AmountUnit `json:"amount_unit"`
+			Money           float64          `json:"money"`
 			PaymentProvider string           `json:"payment_provider"`
 		} `json:"items"`
 	}
@@ -481,8 +504,10 @@ func TestTopUpResponsesExposeEffectiveAmountUnit(t *testing.T) {
 	require.Len(t, response.Items, 3)
 	assert.Equal(t, int64(1050), response.Items[0].Amount)
 	assert.Empty(t, response.Items[0].AmountUnit)
+	assert.InDelta(t, 10.5, response.Items[0].Money, 1e-9)
 	assert.Equal(t, model.PaymentProviderLianlian, response.Items[0].PaymentProvider)
 	assert.Equal(t, int64(1), response.Items[1].Amount)
+	assert.InDelta(t, 0.01, response.Items[1].Money, 1e-9)
 	assert.Equal(t, model.AmountUnitCNYCent, response.Items[1].AmountUnit)
 	assert.Equal(t, int64(10), response.Items[2].Amount)
 	assert.Equal(t, model.AmountUnitUSD, response.Items[2].AmountUnit)
@@ -561,6 +586,130 @@ func TestRequestLianlianAmountTreatsAmountAsCNYCents(t *testing.T) {
 	assert.Contains(t, recorder.Body.String(), "支付方式不存在")
 	recorder = lianlianTestPost(t, router, "/lianlian/amount", `{"amount":100000000,"payment_method":"wxpay"}`)
 	assert.Contains(t, recorder.Body.String(), "支付金额超出范围")
+}
+
+func TestSaveLianlianSettingsValidatesAndPersistsAtomically(t *testing.T) {
+	env := newLianlianTestEnv(t, lianlianTestCreatePayResponse)
+	router := lianlianTestRouter(lianlianTestUserID)
+	privateKey, publicKey := newTestRSAKeyPEM(t)
+
+	oldOptions := common.OptionMap
+	common.OptionMap = map[string]string{}
+	t.Cleanup(func() { common.OptionMap = oldOptions })
+
+	body, err := common.Marshal(saveLianlianSettingsRequest{
+		Enabled:           true,
+		Env:               lianlianpay.EnvProd,
+		Gateway:           "https://gateway.example.test/mch/",
+		MerchantID:        "202601010000000001",
+		PrivateKey:        privateKey,
+		PlatformPublicKey: publicKey,
+		BusiType:          "100001",
+		RiskCategory:      "2001",
+	})
+	require.NoError(t, err)
+	recorder := lianlianTestPost(t, router, "/option/lianlian/save", string(body))
+	require.Contains(t, recorder.Body.String(), `"success":true`)
+	assert.Contains(t, recorder.Body.String(), `"private_key_configured":true`)
+
+	assert.True(t, setting.LianlianEnabled)
+	assert.Equal(t, lianlianpay.EnvProd, setting.LianlianEnv)
+	assert.Equal(t, "https://gateway.example.test/mch", setting.LianlianGateway)
+	assert.Equal(t, "202601010000000001", setting.LianlianMchId)
+	assert.Equal(t, strings.TrimSpace(privateKey), setting.LianlianPrivateKey)
+	assert.Equal(t, strings.TrimSpace(publicKey), setting.LianlianPlatformPublicCert)
+	assert.Equal(t, "2001", setting.LianlianRiskCategory)
+
+	var saved model.Option
+	require.NoError(t, env.db.Where("key = ?", "LianlianRiskCategory").First(&saved).Error)
+	assert.Equal(t, "2001", saved.Value)
+
+	options := httptest.NewRecorder()
+	router.ServeHTTP(options, httptest.NewRequest(http.MethodGet, "/option", nil))
+	assert.Contains(t, options.Body.String(), `"key":"LianlianPrivateKeyConfigured","value":"true"`)
+	assert.NotContains(t, options.Body.String(), "BEGIN RSA PRIVATE KEY")
+
+	invalidBody, err := common.Marshal(saveLianlianSettingsRequest{
+		Enabled:    false,
+		Env:        lianlianpay.EnvProd,
+		MerchantID: "another-merchant",
+		PrivateKey: "not-a-pem",
+	})
+	require.NoError(t, err)
+	recorder = lianlianTestPost(t, router, "/option/lianlian/save", string(invalidBody))
+	assert.Contains(t, recorder.Body.String(), `"success":false`)
+	assert.Equal(t, "202601010000000001", setting.LianlianMchId)
+
+	clearBody, err := common.Marshal(saveLianlianSettingsRequest{
+		Enabled:           false,
+		Env:               lianlianpay.EnvProd,
+		Gateway:           setting.LianlianGateway,
+		MerchantID:        setting.LianlianMchId,
+		PlatformPublicKey: setting.LianlianPlatformPublicCert,
+		BusiType:          setting.LianlianBusiType,
+		RiskCategory:      setting.LianlianRiskCategory,
+		ClearPrivateKey:   true,
+	})
+	require.NoError(t, err)
+	recorder = lianlianTestPost(t, router, "/option/lianlian/save", string(clearBody))
+	require.Contains(t, recorder.Body.String(), `"success":true`)
+	assert.Contains(t, recorder.Body.String(), `"private_key_configured":false`)
+	assert.Empty(t, setting.LianlianPrivateKey)
+
+	options = httptest.NewRecorder()
+	router.ServeHTTP(options, httptest.NewRequest(http.MethodGet, "/option", nil))
+	assert.Contains(t, options.Body.String(), `"key":"LianlianPrivateKeyConfigured","value":"false"`)
+}
+
+func TestSaveLianlianSettingsBlocksIdentityChangeWithOpenOrders(t *testing.T) {
+	env := newLianlianTestEnv(t, lianlianTestCreatePayResponse)
+	router := lianlianTestRouter(lianlianTestUserID)
+	require.NoError(t, env.db.Create(&model.TopUp{
+		UserId:          lianlianTestUserID,
+		Amount:          1000,
+		AmountUnit:      model.AmountUnitCNYCent,
+		Money:           1000,
+		TradeNo:         "USR77NOCONFIGCHANGE",
+		PaymentMethod:   lianlianpay.PayMethodAlipay,
+		PaymentProvider: model.PaymentProviderLianlian,
+		CreateTime:      time.Now().Unix(),
+		Status:          common.TopUpStatusPending,
+	}).Error)
+	privateKey, publicKey := newTestRSAKeyPEM(t)
+	body, err := common.Marshal(saveLianlianSettingsRequest{
+		Enabled:           true,
+		Env:               setting.LianlianEnv,
+		Gateway:           setting.LianlianGateway,
+		MerchantID:        "202601010000000002",
+		PrivateKey:        privateKey,
+		PlatformPublicKey: publicKey,
+		BusiType:          setting.LianlianBusiType,
+		RiskCategory:      setting.LianlianRiskCategory,
+	})
+	require.NoError(t, err)
+
+	recorder := lianlianTestPost(t, router, "/option/lianlian/save", string(body))
+	assert.Contains(t, recorder.Body.String(), `"success":false`)
+	assert.Equal(t, "2020042200284052", setting.LianlianMchId)
+	assert.NotEqual(t, publicKey, setting.LianlianPlatformPublicCert)
+}
+
+func TestGenericOptionUpdateCannotBypassLianlianValidation(t *testing.T) {
+	newLianlianTestEnv(t, lianlianTestCreatePayResponse)
+	router := lianlianTestRouter(lianlianTestUserID)
+	originalMchID := setting.LianlianMchId
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPut,
+		"/option",
+		strings.NewReader(`{"key":"LianlianMchId","value":"bypass"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+
+	assert.Contains(t, recorder.Body.String(), `"success":false`)
+	assert.Equal(t, originalMchID, setting.LianlianMchId)
 }
 
 func TestRequestLianlianPayRejectsGatewayWithoutMchSuffix(t *testing.T) {
@@ -738,6 +887,38 @@ func TestLianlianNotifyRejectsInvalidRequests(t *testing.T) {
 	missingStatusSignature, err := lianlianpay.Sign(env.platformPrivKey, []byte(missingStatusBody))
 	require.NoError(t, err)
 	assert.Equal(t, lianlianpay.FailResponse, postSigned(missingStatusBody, missingStatusSignature))
+}
+
+func TestLianlianNotifyRequiresProviderTradeNo(t *testing.T) {
+	env := newLianlianTestEnv(t, lianlianTestCreatePayResponse)
+	router := lianlianTestRouter(lianlianTestUserID)
+	tradeNo := "USR77NOPROVIDERTX"
+	require.NoError(t, env.db.Create(&model.TopUp{
+		UserId:          lianlianTestUserID,
+		Amount:          1000,
+		AmountUnit:      model.AmountUnitCNYCent,
+		Money:           1000,
+		TradeNo:         tradeNo,
+		PaymentMethod:   lianlianpay.PayMethodAlipay,
+		PaymentProvider: model.PaymentProviderLianlian,
+		Status:          common.TopUpStatusPending,
+	}).Error)
+
+	body := fmt.Sprintf(
+		`{"mch_id":%q,"txn_seqno":%q,"order_amount":"10.00","txn_status":"SUCCESS","pay_method_infos":[{"pay_type":%q,"amount":"10.00"}]}`,
+		setting.LianlianMchId,
+		tradeNo,
+		lianlianpay.PayTypeAlipayNative,
+	)
+	signature, err := lianlianpay.Sign(env.platformPrivKey, []byte(body))
+	require.NoError(t, err)
+
+	recorder := postLianlianNotify(t, router, body, signature)
+	assert.Equal(t, lianlianpay.FailResponse, recorder.Body.String())
+	assert.Equal(t, common.TopUpStatusPending, model.GetTopUpByTradeNo(tradeNo).Status)
+	user, err := model.GetUserById(lianlianTestUserID, false)
+	require.NoError(t, err)
+	assert.Equal(t, 1000, user.Quota)
 }
 
 func TestLianlianNotifyRejectsMerchantMismatch(t *testing.T) {
@@ -1290,6 +1471,32 @@ func TestReconcileLianlianTopUpsReportsPerOrderFailures(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, 1, summary.Scanned)
 	assert.Equal(t, 1, summary.Failed)
+}
+
+func TestReconcileLianlianTopUpsRequiresProviderTradeNo(t *testing.T) {
+	env := newLianlianTestEnv(t, lianlianTestCreatePayResponse)
+	tradeNo := "USR77NORECONCILENOTX"
+	env.queryResponse = fmt.Sprintf(
+		`{"ret_code":"0000","ret_msg":"成功","mch_id":%q,"pay_type":"ALIPAY_NATIVE","txn_seqno":%q,"order_amount":"10.00","txn_status":"SUCCESS","pay_method_infos":[{"pay_type":"ALIPAY_NATIVE","amount":"10.00"}]}`,
+		setting.LianlianMchId,
+		tradeNo,
+	)
+	require.NoError(t, env.db.Create(&model.TopUp{
+		UserId:          lianlianTestUserID,
+		Amount:          1000,
+		AmountUnit:      model.AmountUnitCNYCent,
+		Money:           1000,
+		TradeNo:         tradeNo,
+		PaymentMethod:   lianlianpay.PayMethodAlipay,
+		PaymentProvider: model.PaymentProviderLianlian,
+		CreateTime:      time.Now().Add(-10 * time.Minute).Unix(),
+		Status:          common.TopUpStatusPending,
+	}).Error)
+
+	summary, err := ReconcileLianlianTopUpsOnce(context.Background())
+	require.Error(t, err)
+	assert.Equal(t, 1, summary.Failed)
+	assert.Equal(t, common.TopUpStatusPending, model.GetTopUpByTradeNo(tradeNo).Status)
 }
 
 func TestReconcileLianlianTopUpsQueriesOrdersOlderThanLookback(t *testing.T) {

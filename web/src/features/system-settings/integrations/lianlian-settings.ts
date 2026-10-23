@@ -16,10 +16,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import type { UpdateOptionRequest } from '../types'
 import { removeTrailingSlash } from './utils'
 
 export const DEFAULT_LIANLIAN_BUSI_TYPE = '100001'
+export const DEFAULT_LIANLIAN_RISK_CATEGORY = '1002'
 
 export type LianlianSettingsValues = {
   LianlianEnabled: boolean
@@ -27,8 +27,23 @@ export type LianlianSettingsValues = {
   LianlianGateway: string
   LianlianMchId: string
   LianlianPrivateKey: string
+  LianlianPrivateKeyConfigured: boolean
+  LianlianClearPrivateKey: boolean
   LianlianPlatformPublicCert: string
   LianlianBusiType: string
+  LianlianRiskCategory: string
+}
+
+export type SaveLianlianSettingsRequest = {
+  enabled: boolean
+  env: string
+  gateway: string
+  merchant_id: string
+  private_key: string
+  platform_public_key: string
+  busi_type: string
+  risk_category: string
+  clear_private_key: boolean
 }
 
 export function isValidLianlianGateway(value: string): boolean {
@@ -51,51 +66,61 @@ export function isValidLianlianGateway(value: string): boolean {
   }
 }
 
-export function buildLianlianSettingsUpdates(
+export function buildLianlianSettingsRequest(
   values: LianlianSettingsValues,
   initialValues: LianlianSettingsValues
-): UpdateOptionRequest[] {
+): SaveLianlianSettingsRequest | null {
   const normalized = {
-    LianlianEnabled: values.LianlianEnabled,
-    LianlianEnv: values.LianlianEnv === 'prod' ? 'prod' : 'test',
-    LianlianGateway: removeTrailingSlash(values.LianlianGateway),
-    LianlianMchId: values.LianlianMchId.trim(),
-    LianlianPrivateKey: values.LianlianPrivateKey.trim(),
-    LianlianPlatformPublicCert: values.LianlianPlatformPublicCert.trim(),
-    LianlianBusiType:
+    enabled: values.LianlianEnabled,
+    env: values.LianlianEnv === 'prod' ? 'prod' : 'test',
+    gateway: removeTrailingSlash(values.LianlianGateway),
+    merchantID: values.LianlianMchId.trim(),
+    privateKey: values.LianlianClearPrivateKey
+      ? ''
+      : values.LianlianPrivateKey.trim(),
+    clearPrivateKey: values.LianlianClearPrivateKey,
+    platformPublicKey: values.LianlianPlatformPublicCert.trim(),
+    busiType:
       values.LianlianBusiType.trim() || DEFAULT_LIANLIAN_BUSI_TYPE,
+    riskCategory:
+      values.LianlianRiskCategory.trim() || DEFAULT_LIANLIAN_RISK_CATEGORY,
   }
   const initial = {
-    LianlianEnabled: initialValues.LianlianEnabled,
-    LianlianEnv: initialValues.LianlianEnv === 'prod' ? 'prod' : 'test',
-    LianlianGateway: removeTrailingSlash(initialValues.LianlianGateway),
-    LianlianMchId: initialValues.LianlianMchId.trim(),
-    LianlianPlatformPublicCert: initialValues.LianlianPlatformPublicCert.trim(),
-    LianlianBusiType:
+    enabled: initialValues.LianlianEnabled,
+    env: initialValues.LianlianEnv === 'prod' ? 'prod' : 'test',
+    gateway: removeTrailingSlash(initialValues.LianlianGateway),
+    merchantID: initialValues.LianlianMchId.trim(),
+    platformPublicKey: initialValues.LianlianPlatformPublicCert.trim(),
+    busiType:
       initialValues.LianlianBusiType.trim() || DEFAULT_LIANLIAN_BUSI_TYPE,
+    riskCategory:
+      initialValues.LianlianRiskCategory.trim() ||
+      DEFAULT_LIANLIAN_RISK_CATEGORY,
   }
 
-  const updates: UpdateOptionRequest[] = []
-  for (const key of [
-    'LianlianEnabled',
-    'LianlianEnv',
-    'LianlianGateway',
-    'LianlianMchId',
-    'LianlianPlatformPublicCert',
-    'LianlianBusiType',
-  ] as const) {
-    if (normalized[key] !== initial[key]) {
-      updates.push({ key, value: normalized[key] })
-    }
+  const changed =
+    normalized.enabled !== initial.enabled ||
+    normalized.env !== initial.env ||
+    normalized.gateway !== initial.gateway ||
+    normalized.merchantID !== initial.merchantID ||
+    normalized.platformPublicKey !== initial.platformPublicKey ||
+    normalized.busiType !== initial.busiType ||
+    normalized.riskCategory !== initial.riskCategory ||
+    normalized.privateKey !== '' ||
+    normalized.clearPrivateKey
+  if (!changed) {
+    return null
   }
 
-  // Secrets are write-only because GET /api/option/ strips key-suffixed
-  // options. An empty field therefore means "keep the stored private key".
-  if (normalized.LianlianPrivateKey) {
-    updates.push({
-      key: 'LianlianPrivateKey',
-      value: normalized.LianlianPrivateKey,
-    })
+  return {
+    enabled: normalized.enabled,
+    env: normalized.env,
+    gateway: normalized.gateway,
+    merchant_id: normalized.merchantID,
+    private_key: normalized.privateKey,
+    platform_public_key: normalized.platformPublicKey,
+    busi_type: normalized.busiType,
+    risk_category: normalized.riskCategory,
+    clear_private_key: normalized.clearPrivateKey,
   }
-  return updates
 }
