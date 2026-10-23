@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -397,6 +398,85 @@ func TestMigrationSchemaStability(t *testing.T) {
 				assert.Equal(t, common.TopUpStatusCreateUnknown, saved.Status)
 				values["LianlianMchId"] = "different-merchant"
 				assert.ErrorIs(t, UpdateLianlianOptionsAtomic(values), ErrLianlianConfigOpenOrders)
+			})
+
+			t.Run("payment_settlement_amounts", func(t *testing.T) {
+				require.NoError(t, db.AutoMigrate(&User{}, &TopUp{}))
+				oldDB := DB
+				oldMainType, oldLogType := common.MainDatabaseType(), common.LogDatabaseType()
+				oldQuota, oldRate := common.QuotaPerUnit, operation_setting.USDExchangeRate
+				oldRedis := common.RedisEnabled
+				DB = db
+				common.SetMainDatabaseType(map[string]common.DatabaseType{
+					"sqlite":   common.DatabaseTypeSQLite,
+					"mysql":    common.DatabaseTypeMySQL,
+					"postgres": common.DatabaseTypePostgreSQL,
+				}[dialect])
+				initCol()
+				common.QuotaPerUnit, operation_setting.USDExchangeRate = 100, 7.3
+				common.RedisEnabled = false
+				t.Cleanup(func() {
+					DB = oldDB
+					common.SetDatabaseTypes(oldMainType, oldLogType)
+					initCol()
+					common.QuotaPerUnit, operation_setting.USDExchangeRate = oldQuota, oldRate
+					common.RedisEnabled = oldRedis
+					_ = db.Migrator().DropTable(&TopUp{}, &User{})
+				})
+				for _, tc := range []struct {
+					provider string
+					amount   int64
+					unit     AmountUnit
+					want     int
+				}{
+					{PaymentProviderEpay, 2, "", 200},
+					{PaymentProviderCreem, 730, "", 730},
+					{PaymentProviderWaffo, 2, "", 200},
+					{PaymentProviderWaffoPancake, 2, "", 200},
+					{PaymentProviderStripe, 2, "", 300},
+					{PaymentProviderLianlian, 730, AmountUnitCNYCent, 100},
+				} {
+					for _, manual := range []bool{false, true} {
+						if tc.provider == PaymentProviderStripe && !manual {
+							continue // Stripe automatic settlement is unchanged.
+						}
+						name := tc.provider + "-automatic"
+						if manual {
+							name = tc.provider + "-manual"
+						}
+						t.Run(name, func(t *testing.T) {
+							user := User{Username: name, AffCode: name, Quota: 10}
+							require.NoError(t, db.Create(&user).Error)
+							order := TopUp{UserId: user.Id, TradeNo: name, Amount: tc.amount,
+								AmountUnit: tc.unit, Money: 3, PaymentMethod: "alipay",
+								PaymentProvider: tc.provider, Status: common.TopUpStatusPending}
+							if tc.provider == PaymentProviderLianlian {
+								order.Money = 730
+							}
+							require.NoError(t, db.Create(&order).Error)
+							var err error
+							if manual {
+								err = ManualCompleteTopUp(name, "test")
+							} else {
+								switch tc.provider {
+								case PaymentProviderEpay:
+									_, err = RechargeEpay(name, "alipay", "test")
+								case PaymentProviderCreem:
+									err = RechargeCreem(name, "", "", "test")
+								case PaymentProviderWaffo:
+									err = RechargeWaffo(name, "test")
+								case PaymentProviderWaffoPancake:
+									err = RechargeWaffoPancake(name)
+								case PaymentProviderLianlian:
+									_, err = RechargeLianlian(name, "alipay", "test", "7.30", "LL-"+name)
+								}
+							}
+							require.NoError(t, err)
+							assert.Equal(t, 10+tc.want, getUserQuotaForPaymentGuardTest(t, user.Id))
+							assert.Equal(t, common.TopUpStatusSuccess, getTopUpStatusForPaymentGuardTest(t, name))
+						})
+					}
+				}
 			})
 
 			t.Run("lianlian_config_callback_window", func(t *testing.T) {

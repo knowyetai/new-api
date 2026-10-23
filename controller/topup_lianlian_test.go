@@ -1403,7 +1403,7 @@ func TestRequestLianlianPaySkipsWalletCapacityThatWouldOverflow(t *testing.T) {
 	assert.Zero(t, env.requests)
 }
 
-func TestUpdateLianlianProviderTradeNoDoesNotOverwriteSettlementStatus(t *testing.T) {
+func TestCompleteLianlianOrderCreationDoesNotOverwriteSettlementStatus(t *testing.T) {
 	env := newLianlianTestEnv(t, lianlianTestCreatePayResponse)
 	tradeNo := "USR77NOSETTLEMENTRACE"
 	require.NoError(t, env.db.Create(&model.TopUp{
@@ -1417,12 +1417,19 @@ func TestUpdateLianlianProviderTradeNoDoesNotOverwriteSettlementStatus(t *testin
 		Status:          common.TopUpStatusSuccess,
 	}).Error)
 
-	require.NoError(t, model.UpdateTopUpProviderTradeNo(tradeNo, "LLRACE1"))
+	completed, err := model.CompleteLianlianOrderCreation(tradeNo, "LLRACE1", "https://qr.alipay.com/race")
+	require.NoError(t, err)
+	assert.Equal(t, common.TopUpStatusSuccess, completed.Status)
 	order := model.GetTopUpByTradeNo(tradeNo)
 	require.NotNil(t, order)
 	assert.Equal(t, common.TopUpStatusSuccess, order.Status)
 	assert.Equal(t, "LLRACE1", order.ProviderTradeNo)
-	assert.ErrorIs(t, model.UpdateTopUpProviderTradeNo(tradeNo, "LLRACE2"), model.ErrLianlianProviderTradeNoMismatch)
+	_, err = model.CompleteLianlianOrderCreation(tradeNo, "LLRACE2", "https://qr.alipay.com/other")
+	assert.ErrorIs(t, err, model.ErrLianlianProviderTradeNoMismatch)
+	order = model.GetTopUpByTradeNo(tradeNo)
+	require.NotNil(t, order)
+	assert.Equal(t, "LLRACE1", order.ProviderTradeNo)
+	assert.Equal(t, "https://qr.alipay.com/race", order.LianlianQRCode)
 }
 
 func TestManualCompleteLianlianTopUpUsesAmountCents(t *testing.T) {

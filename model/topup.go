@@ -255,59 +255,6 @@ func (topUp *TopUp) PayableMoney() float64 {
 	return topUp.Money
 }
 
-// UpdateTopUpProviderTradeNo records an upstream transaction number without
-// overwriting payment state. A callback may complete the order while the
-// create-payment response is still in flight.
-func UpdateTopUpProviderTradeNo(tradeNo string, providerTradeNo string) error {
-	providerTradeNo = strings.TrimSpace(providerTradeNo)
-	if tradeNo == "" || providerTradeNo == "" {
-		return nil
-	}
-	if len(providerTradeNo) > 128 {
-		return ErrLianlianProviderTradeNoInvalid
-	}
-	result := DB.Model(&TopUp{}).
-		Where("trade_no = ? AND (provider_trade_no = '' OR provider_trade_no = ?)", tradeNo, providerTradeNo).
-		Update("provider_trade_no", providerTradeNo)
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 1 {
-		return nil
-	}
-
-	var topUp TopUp
-	if err := DB.Select("provider_trade_no").Where("trade_no = ?", tradeNo).First(&topUp).Error; err != nil {
-		return ErrTopUpNotFound
-	}
-	if topUp.ProviderTradeNo != providerTradeNo {
-		return ErrLianlianProviderTradeNoMismatch
-	}
-	return nil
-}
-
-// UpdateLianlianPaymentResult stores the retryable QR payload alongside the
-// provider transaction number without changing settlement state.
-func UpdateLianlianPaymentResult(tradeNo string, providerTradeNo string, qrCode string) error {
-	if err := UpdateTopUpProviderTradeNo(tradeNo, providerTradeNo); err != nil {
-		return err
-	}
-	qrCode = strings.TrimSpace(qrCode)
-	if qrCode == "" {
-		return nil
-	}
-	result := DB.Model(&TopUp{}).
-		Where("trade_no = ? AND payment_provider = ?", tradeNo, PaymentProviderLianlian).
-		Update("lianlian_qr_code", qrCode)
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return ErrTopUpNotFound
-	}
-	return nil
-}
-
 // FindPendingTopUpsByProvider returns a keyset page of pending or
 // user-cancelled orders old enough for an upstream status check.
 func FindPendingTopUpsByProvider(provider string, createdBefore int64, afterID int, limit int) ([]TopUp, error) {
@@ -446,7 +393,9 @@ func RechargeEpay(tradeNo string, actualPaymentMethod string, callerIp string, p
 			topUp.PaymentMethod = actualPaymentMethod
 		}
 		var quotaErr error
-		quotaToAdd, quotaErr = topUp.Quota()
+		quotaToAdd, quotaErr = common.WalletQuotaFromDecimalStrict(
+			decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
+		)
 		if quotaErr != nil || quotaToAdd <= 0 {
 			return ErrInvalidTopUpQuota
 		}
@@ -815,16 +764,23 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 			return errors.New("订单状态不是待支付，无法补单")
 		}
 
-		// Stripe stores the credited USD value in Money. Other providers use
-		// Amount plus AmountUnit, including legacy unit inference.
+		// Keep each provider's existing amount semantics; only Lianlian uses
+		// the explicit amount-unit conversion.
 		var quotaErr error
 		switch topUp.PaymentProvider {
 		case PaymentProviderStripe:
 			quotaToAdd, quotaErr = common.WalletQuotaFromDecimalStrict(
 				decimal.NewFromFloat(topUp.Money).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
 			)
-		default:
+		case PaymentProviderLianlian:
 			quotaToAdd, quotaErr = topUp.Quota()
+		case PaymentProviderCreem:
+			// Creem Amount already stores quota, matching its automatic settlement.
+			quotaToAdd, quotaErr = common.WalletQuotaFromDecimalStrict(decimal.NewFromInt(topUp.Amount))
+		default:
+			quotaToAdd, quotaErr = common.WalletQuotaFromDecimalStrict(
+				decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
+			)
 		}
 		if quotaErr != nil || quotaToAdd <= 0 {
 			return ErrInvalidTopUpQuota
@@ -891,7 +847,7 @@ func RechargeCreem(referenceId string, customerEmail string, customerName string
 			return err
 		}
 
-		quota, err = topUp.Quota()
+		quota, err = common.WalletQuotaFromDecimalStrict(decimal.NewFromInt(topUp.Amount))
 		if err != nil || quota <= 0 {
 			return ErrInvalidTopUpQuota
 		}
@@ -959,7 +915,9 @@ func RechargeWaffo(tradeNo string, callerIp string) (err error) {
 			return errors.New("充值订单状态错误")
 		}
 
-		quotaToAdd, err = topUp.Quota()
+		quotaToAdd, err = common.WalletQuotaFromDecimalStrict(
+			decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
+		)
 		if err != nil || quotaToAdd <= 0 {
 			return ErrInvalidTopUpQuota
 		}
@@ -1017,7 +975,9 @@ func RechargeWaffoPancake(tradeNo string) (err error) {
 			return errors.New("充值订单状态错误")
 		}
 
-		quotaToAdd, err = topUp.Quota()
+		quotaToAdd, err = common.WalletQuotaFromDecimalStrict(
+			decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
+		)
 		if err != nil || quotaToAdd <= 0 {
 			return ErrInvalidTopUpQuota
 		}

@@ -363,7 +363,6 @@ func RequestEpay(c *gin.Context) {
 		BillingUnitId:   teamID,
 		OperatorUserId:  operatorID,
 		Amount:          amount,
-		AmountUnit:      model.AmountUnitUSD,
 		Money:           payMoney,
 		TradeNo:         tradeNo,
 		PaymentMethod:   req.PaymentMethod,
