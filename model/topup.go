@@ -369,8 +369,9 @@ func UpdatePendingTopUpStatus(tradeNo string, expectedPaymentProvider string, ta
 	})
 }
 
-// TransitionLianlianTopUpStatus closes pending or user-cancelled Lianlian
-// orders after the provider confirms a terminal state.
+// TransitionLianlianTopUpStatus moves a recoverable Lianlian order to the
+// requested state. It is used for local cancellation and provider-confirmed
+// terminal states; successful callbacks can still settle the order afterwards.
 func TransitionLianlianTopUpStatus(tradeNo string, targetStatus string) (bool, error) {
 	if tradeNo == "" {
 		return false, errors.New("未提供支付单号")

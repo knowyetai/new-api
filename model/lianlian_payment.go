@@ -6,12 +6,17 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/service/lianlianpay"
 	"github.com/QuantumNous/new-api/setting"
 
 	"gorm.io/gorm"
 )
 
 const lianlianPaymentConfigLockOptionKey = "LianlianMchId"
+
+const lianlianCallbackConfigLockSeconds = int64(
+	(lianlianpay.PayExpireMinutes + lianlianpay.CallbackRetryMinutes) * 60,
+)
 
 var (
 	ErrLianlianPaymentDisabled         = errors.New("lianlian payment disabled")
@@ -134,11 +139,11 @@ func UpdateLianlianOptionsAtomic(values map[string]string) error {
 		}
 		next := overlayLianlianPaymentConfig(current, values)
 		if lianlianConfigIdentityChanged(current, next) {
-			hasOpenOrders, err := hasOpenLianlianTopUps(tx)
+			hasOrdersLockingConfig, err := hasLianlianOrdersLockingConfig(tx)
 			if err != nil {
 				return err
 			}
-			if hasOpenOrders {
+			if hasOrdersLockingConfig {
 				return ErrLianlianConfigOpenOrders
 			}
 		}
@@ -235,14 +240,23 @@ func lianlianConfigIdentityChanged(current LianlianPaymentConfig, next LianlianP
 		current.PlatformPublicKey != next.PlatformPublicKey
 }
 
-func hasOpenLianlianTopUps(tx *gorm.DB) (bool, error) {
+// Recently expired orders keep the configuration locked because Lianlian may
+// still deliver a successful callback signed by that merchant and public key.
+func hasLianlianOrdersLockingConfig(tx *gorm.DB) (bool, error) {
 	var topUp TopUp
+	callbackRetentionStart := common.GetTimestamp() - lianlianCallbackConfigLockSeconds
 	err := tx.Select("id").
-		Where("payment_provider = ? AND status IN ?", PaymentProviderLianlian, []string{
-			common.TopUpStatusCreateUnknown,
-			common.TopUpStatusPending,
-			common.TopUpStatusCancelled,
-		}).
+		Where(
+			"payment_provider = ? AND (status IN ? OR (status = ? AND create_time > ?))",
+			PaymentProviderLianlian,
+			[]string{
+				common.TopUpStatusCreateUnknown,
+				common.TopUpStatusPending,
+				common.TopUpStatusCancelled,
+			},
+			common.TopUpStatusExpired,
+			callbackRetentionStart,
+		).
 		Limit(1).
 		Find(&topUp).Error
 	return topUp.Id > 0, err

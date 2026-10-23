@@ -620,7 +620,7 @@ func GetLianlianOrder(c *gin.Context) {
 	})
 }
 
-// CancelLianlianOrder abandons a pending order locally. A provider-confirmed
+// CancelLianlianOrder abandons a recoverable order locally. A provider-confirmed
 // payment can still settle the order after cancellation.
 func CancelLianlianOrder(c *gin.Context) {
 	topUp, ok := getOwnedLianlianTopUp(c)
@@ -632,27 +632,22 @@ func CancelLianlianOrder(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "订单已过期，请重新创建订单"})
 		return
 	}
-	if topUp.Status == common.TopUpStatusCancelled {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "success",
-			"data": gin.H{
-				"trade_no": topUp.TradeNo,
-				"status":   topUp.Status,
-			},
-		})
-		return
-	}
 	if topUp.Status != common.TopUpStatusPending &&
-		topUp.Status != common.TopUpStatusCreateUnknown {
+		topUp.Status != common.TopUpStatusCreateUnknown &&
+		topUp.Status != common.TopUpStatusCancelled {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "当前订单状态不可取消"})
 		return
 	}
-	err := model.UpdatePendingTopUpStatus(
+	updated, err := model.TransitionLianlianTopUpStatus(
 		topUp.TradeNo,
-		model.PaymentProviderLianlian,
 		common.TopUpStatusCancelled,
 	)
 	if err != nil {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("连连 取消订单失败 trade_no=%s error=%q", topUp.TradeNo, err.Error()))
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "取消订单失败"})
+		return
+	}
+	if !updated {
 		current := model.GetTopUpByTradeNo(topUp.TradeNo)
 		if current != nil && current.Status == common.TopUpStatusCancelled {
 			c.JSON(http.StatusOK, gin.H{
@@ -664,12 +659,11 @@ func CancelLianlianOrder(c *gin.Context) {
 			})
 			return
 		}
-		if errors.Is(err, model.ErrTopUpStatusInvalid) {
-			c.JSON(http.StatusOK, gin.H{"message": "error", "data": "当前订单状态不可取消"})
+		if current != nil && current.Status == common.TopUpStatusExpired {
+			c.JSON(http.StatusOK, gin.H{"message": "error", "data": "订单已过期，请重新创建订单"})
 			return
 		}
-		logger.LogError(c.Request.Context(), fmt.Sprintf("连连 取消订单失败 trade_no=%s error=%q", topUp.TradeNo, err.Error()))
-		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "取消订单失败"})
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "当前订单状态不可取消"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{

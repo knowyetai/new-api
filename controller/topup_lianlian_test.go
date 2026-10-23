@@ -702,6 +702,69 @@ func TestSaveLianlianSettingsBlocksIdentityChangeWithOpenOrders(t *testing.T) {
 	assert.NotEqual(t, publicKey, setting.LianlianPlatformPublicCert)
 }
 
+func TestSaveLianlianSettingsProtectsLateCallbackWindow(t *testing.T) {
+	now := time.Now().Unix()
+	callbackWindowSeconds := int64(lianlianpay.CallbackRetryMinutes) * 60
+	testCases := []struct {
+		name        string
+		expiredAgo  int64
+		wantBlocked bool
+	}{
+		{
+			name:        "expired order still inside callback retry window",
+			expiredAgo:  lianlianOrderTTLSeconds + callbackWindowSeconds/2,
+			wantBlocked: true,
+		},
+		{
+			name:        "expired order outside callback retry window",
+			expiredAgo:  lianlianOrderTTLSeconds + callbackWindowSeconds + 60,
+			wantBlocked: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newLianlianTestEnv(t, lianlianTestCreatePayResponse)
+			router := lianlianTestRouter(lianlianTestUserID)
+			oldOptions := common.OptionMap
+			common.OptionMap = map[string]string{}
+			t.Cleanup(func() { common.OptionMap = oldOptions })
+			require.NoError(t, env.db.Create(&model.TopUp{
+				UserId:          lianlianTestUserID,
+				Amount:          1000,
+				AmountUnit:      model.AmountUnitCNYCent,
+				Money:           1000,
+				TradeNo:         "USR77NOCALLBACKWINDOW" + strings.ToUpper(strings.ReplaceAll(tc.name, " ", "")),
+				PaymentMethod:   lianlianpay.PayMethodAlipay,
+				PaymentProvider: model.PaymentProviderLianlian,
+				CreateTime:      now - tc.expiredAgo,
+				Status:          common.TopUpStatusExpired,
+			}).Error)
+
+			nextMerchantID := "202601010000000099"
+			body, err := common.Marshal(saveLianlianSettingsRequest{
+				Enabled:           true,
+				Env:               setting.LianlianEnv,
+				Gateway:           setting.LianlianGateway,
+				MerchantID:        nextMerchantID,
+				PlatformPublicKey: setting.LianlianPlatformPublicCert,
+				BusiType:          setting.LianlianBusiType,
+				RiskCategory:      setting.LianlianRiskCategory,
+			})
+			require.NoError(t, err)
+
+			recorder := lianlianTestPost(t, router, "/option/lianlian/save", string(body))
+			if tc.wantBlocked {
+				assert.Contains(t, recorder.Body.String(), "仍处于回调重试窗口")
+				assert.NotEqual(t, nextMerchantID, setting.LianlianMchId)
+				return
+			}
+			assert.Contains(t, recorder.Body.String(), `"success":true`)
+			assert.Equal(t, nextMerchantID, setting.LianlianMchId)
+		})
+	}
+}
+
 func TestSaveLianlianSettingsBlocksPrivateKeyChangeWithOpenOrders(t *testing.T) {
 	env := newLianlianTestEnv(t, lianlianTestCreatePayResponse)
 	router := lianlianTestRouter(lianlianTestUserID)
@@ -1160,6 +1223,40 @@ func TestCancelLianlianOrderBlocksPayment(t *testing.T) {
 	router.ServeHTTP(cancel, httptest.NewRequest(http.MethodPost, "/lianlian/order/"+tradeNo+"/cancel", nil))
 	assert.Contains(t, cancel.Body.String(), `"message":"success"`)
 	assert.Contains(t, cancel.Body.String(), `"status":"cancelled"`)
+}
+
+func TestCancelLianlianOrderCancelsCreateUnknownAndLatePaymentSettles(t *testing.T) {
+	env := newLianlianTestEnv(t, lianlianTestCreatePayResponse)
+	router := lianlianTestRouter(lianlianTestUserID)
+	tradeNo := "USR77NOCANCELUNKNOWN"
+	require.NoError(t, env.db.Create(&model.TopUp{
+		UserId:          lianlianTestUserID,
+		Amount:          1000,
+		AmountUnit:      model.AmountUnitCNYCent,
+		Money:           1000,
+		TradeNo:         tradeNo,
+		PaymentMethod:   lianlianpay.PayMethodAlipay,
+		PaymentProvider: model.PaymentProviderLianlian,
+		CreateTime:      time.Now().Unix(),
+		Status:          common.TopUpStatusCreateUnknown,
+	}).Error)
+
+	cancel := httptest.NewRecorder()
+	router.ServeHTTP(cancel, httptest.NewRequest(http.MethodPost, "/lianlian/order/"+tradeNo+"/cancel", nil))
+	assert.Contains(t, cancel.Body.String(), `"message":"success"`)
+	assert.Contains(t, cancel.Body.String(), `"status":"cancelled"`)
+
+	order := model.GetTopUpByTradeNo(tradeNo)
+	require.NotNil(t, order)
+	assert.Equal(t, common.TopUpStatusCancelled, order.Status)
+
+	body, signature := lianlianNotifyBody(t, env, tradeNo, "10.00")
+	notify := postLianlianNotify(t, router, body, signature)
+	assert.Equal(t, lianlianpay.SuccessResponse, notify.Body.String())
+
+	order = model.GetTopUpByTradeNo(tradeNo)
+	require.NotNil(t, order)
+	assert.Equal(t, common.TopUpStatusSuccess, order.Status)
 }
 
 func TestCancelLianlianOrderCannotOverwritePaidOrder(t *testing.T) {

@@ -110,7 +110,7 @@ func SaveLianlianSettings(c *gin.Context) {
 	if err := model.UpdateLianlianOptionsAtomic(values); err != nil {
 		switch {
 		case errors.Is(err, model.ErrLianlianConfigOpenOrders):
-			common.ApiErrorMsg(c, "存在创建中、待支付或已取消但未关闭的连连订单，暂不能切换环境、商户号、网关、商户私钥或平台公钥")
+			common.ApiErrorMsg(c, "存在创建中、待支付、已取消未关闭或仍处于回调重试窗口的连连订单，暂不能切换环境、商户号、网关、商户私钥或平台公钥")
 			return
 		default:
 			logger.LogError(c.Request.Context(), "保存连连支付配置失败: "+err.Error())

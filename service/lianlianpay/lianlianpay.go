@@ -47,6 +47,10 @@ const (
 	// PayExpireMinutes 是扫码订单的有效期（分钟），与钱包页倒计时保持一致。
 	PayExpireMinutes = 15
 
+	// CallbackRetryMinutes 是连连在订单过期后继续重发成功通知的窗口。
+	// 该窗口内仍需保留订单创建时的商户号与平台公钥，以便迟到回调完成验签和入账。
+	CallbackRetryMinutes = 60
+
 	// SignTypeRSA 是连连支持的签名类型。
 	SignTypeRSA = "RSA"
 

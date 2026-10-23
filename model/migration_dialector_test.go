@@ -352,6 +352,47 @@ func TestMigrationSchemaStability(t *testing.T) {
 				assert.Equal(t, common.TopUpStatusExpired, transitioned.Status)
 			})
 
+			t.Run("lianlian_config_callback_window", func(t *testing.T) {
+				const table = "top_ups"
+				t.Cleanup(func() { _ = db.Migrator().DropTable(table) })
+				require.NoError(t, db.Table(table).AutoMigrate(&TopUp{}))
+
+				now := common.GetTimestamp()
+				require.NoError(t, db.Table(table).Create([]TopUp{
+					{
+						Id:              1,
+						UserId:          7,
+						Amount:          100,
+						AmountUnit:      AmountUnitCNYCent,
+						Money:           100,
+						TradeNo:         "config-lock-recent-expired",
+						PaymentProvider: PaymentProviderLianlian,
+						CreateTime:      now - lianlianCallbackConfigLockSeconds + 60,
+						Status:          common.TopUpStatusExpired,
+					},
+					{
+						Id:              2,
+						UserId:          7,
+						Amount:          100,
+						AmountUnit:      AmountUnitCNYCent,
+						Money:           100,
+						TradeNo:         "config-lock-old-expired",
+						PaymentProvider: PaymentProviderLianlian,
+						CreateTime:      now - lianlianCallbackConfigLockSeconds - 60,
+						Status:          common.TopUpStatusExpired,
+					},
+				}).Error)
+
+				locked, err := hasLianlianOrdersLockingConfig(db)
+				require.NoError(t, err)
+				assert.True(t, locked)
+
+				require.NoError(t, db.Table(table).Where("id = ?", 1).Delete(&TopUp{}).Error)
+				locked, err = hasLianlianOrdersLockingConfig(db)
+				require.NoError(t, err)
+				assert.False(t, locked)
+			})
+
 			if dialect == "mysql" {
 				t.Run("decimal_default_and_real_changes", func(t *testing.T) {
 					const table = "migration_decimal_test"
