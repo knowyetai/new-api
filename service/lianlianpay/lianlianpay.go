@@ -20,6 +20,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -180,6 +182,16 @@ func GatewayURL(env string, override string) (string, error) {
 		base = GatewayTest
 		if env == EnvProd {
 			base = GatewayProd
+		}
+	}
+	parsed, err := url.Parse(base)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
+		parsed.Hostname() == "" || parsed.User != nil || strings.ContainsAny(base, "?#") {
+		return "", errors.New("连连网关必须是有效的 HTTP 或 HTTPS 地址，且不能包含用户信息、查询参数或片段")
+	}
+	if port := parsed.Port(); port != "" {
+		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+			return "", errors.New("连连网关端口无效")
 		}
 	}
 	base = strings.TrimRight(base, "/")

@@ -162,7 +162,7 @@ func UpdateLianlianOptionsAtomic(values map[string]string) error {
 
 func lockLianlianPaymentConfig(tx *gorm.DB) error {
 	var option Option
-	err := tx.Where("key = ?", lianlianPaymentConfigLockOptionKey).First(&option).Error
+	err := tx.Where(map[string]any{"key": lianlianPaymentConfigLockOptionKey}).First(&option).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		option = Option{
 			Key:   lianlianPaymentConfigLockOptionKey,
@@ -175,7 +175,7 @@ func lockLianlianPaymentConfig(tx *gorm.DB) error {
 		return err
 	}
 	return lockForUpdate(tx).
-		Where("key = ?", lianlianPaymentConfigLockOptionKey).
+		Where(map[string]any{"key": lianlianPaymentConfigLockOptionKey}).
 		First(&Option{}).Error
 }
 
@@ -191,7 +191,7 @@ func loadLianlianPaymentConfig(tx *gorm.DB) (LianlianPaymentConfig, error) {
 		"LianlianRiskCategory",
 	}
 	var options []Option
-	if err := tx.Where("key IN ?", keys).Find(&options).Error; err != nil {
+	if err := tx.Where(map[string]any{"key": keys}).Find(&options).Error; err != nil {
 		return LianlianPaymentConfig{}, err
 	}
 	stored := make(map[string]string, len(options))
@@ -264,7 +264,7 @@ func hasLianlianOrdersLockingConfig(tx *gorm.DB) (bool, error) {
 
 func upsertOption(tx *gorm.DB, key string, value string) error {
 	var option Option
-	err := tx.Where("key = ?", key).First(&option).Error
+	err := tx.Where(map[string]any{"key": key}).First(&option).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return tx.Create(&Option{Key: key, Value: value}).Error
 	}

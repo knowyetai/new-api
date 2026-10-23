@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -350,6 +351,52 @@ func TestMigrationSchemaStability(t *testing.T) {
 				var transitioned TopUp
 				require.NoError(t, db.Where("trade_no = ?", "reconcile-pending").First(&transitioned).Error)
 				assert.Equal(t, common.TopUpStatusExpired, transitioned.Status)
+			})
+
+			t.Run("lianlian_config_save_and_create", func(t *testing.T) {
+				require.NoError(t, db.AutoMigrate(&Option{}, &TopUp{}))
+				oldDB, oldOptions := DB, common.OptionMap
+				oldMainType, oldLogType := common.MainDatabaseType(), common.LogDatabaseType()
+				databaseType := map[string]common.DatabaseType{
+					"sqlite":   common.DatabaseTypeSQLite,
+					"mysql":    common.DatabaseTypeMySQL,
+					"postgres": common.DatabaseTypePostgreSQL,
+				}[dialect]
+				common.SetDatabaseTypes(databaseType, oldLogType)
+				oldEnabled, oldMerchant := setting.LianlianEnabled, setting.LianlianMchId
+				oldKey, oldBusiType := setting.LianlianPrivateKey, setting.LianlianBusiType
+				DB, common.OptionMap = db, map[string]string{}
+				t.Cleanup(func() {
+					DB, common.OptionMap = oldDB, oldOptions
+					common.SetDatabaseTypes(oldMainType, oldLogType)
+					setting.LianlianEnabled, setting.LianlianMchId = oldEnabled, oldMerchant
+					setting.LianlianPrivateKey, setting.LianlianBusiType = oldKey, oldBusiType
+					_ = db.Migrator().DropTable(&TopUp{}, &Option{})
+				})
+				values := map[string]string{
+					"LianlianEnabled":    "true",
+					"LianlianMchId":      "test-merchant",
+					"LianlianPrivateKey": "test-signing-key",
+					"LianlianBusiType":   "100001",
+				}
+				require.NoError(t, UpdateLianlianOptionsAtomic(values))
+				values["LianlianBusiType"] = "100002"
+				require.NoError(t, UpdateLianlianOptionsAtomic(values))
+				order := &TopUp{
+					UserId: 7, TradeNo: "config-save-and-create", Amount: 1,
+					AmountUnit: AmountUnitCNYCent, Money: 1,
+					PaymentProvider: PaymentProviderLianlian,
+					Status:          common.TopUpStatusCreateUnknown,
+				}
+				config, err := CreateLianlianTopUpWithConfigLock(order, nil)
+				require.NoError(t, err)
+				assert.Equal(t, "test-merchant", config.MerchantID)
+				assert.Equal(t, "100002", config.BusiType)
+				var saved TopUp
+				require.NoError(t, db.Where("trade_no = ?", order.TradeNo).First(&saved).Error)
+				assert.Equal(t, common.TopUpStatusCreateUnknown, saved.Status)
+				values["LianlianMchId"] = "different-merchant"
+				assert.ErrorIs(t, UpdateLianlianOptionsAtomic(values), ErrLianlianConfigOpenOrders)
 			})
 
 			t.Run("lianlian_config_callback_window", func(t *testing.T) {

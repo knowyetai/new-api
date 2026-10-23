@@ -647,6 +647,35 @@ func TestSaveLianlianSettingsValidatesAndPersistsAtomically(t *testing.T) {
 	assert.Contains(t, recorder.Body.String(), `"success":false`)
 	assert.Equal(t, "202601010000000001", setting.LianlianMchId)
 
+	for _, gateway := range []string{
+		"abc/mch",
+		"/mch",
+		"ftp://gateway.example.test/mch",
+		"https:///mch",
+		"https://user:password@gateway.example.test/mch",
+		"https://gateway.example.test/mch?redirect=/mch",
+		"https://gateway.example.test/mch?",
+		"https://gateway.example.test/mch#fragment/mch",
+		"https://gateway.example.test/mch#",
+		"https://gateway.example.test:bad/mch",
+		"https://gateway.example.test:65536/mch",
+	} {
+		t.Run(gateway, func(t *testing.T) {
+			body, err := common.Marshal(saveLianlianSettingsRequest{
+				Env:        lianlianpay.EnvProd,
+				Gateway:    gateway,
+				MerchantID: "must-not-be-saved",
+			})
+			require.NoError(t, err)
+			response := lianlianTestPost(t, router, "/option/lianlian/save", string(body))
+			assert.Contains(t, response.Body.String(), `"success":false`)
+			assert.Equal(t, "https://gateway.example.test/mch", setting.LianlianGateway)
+			var stored model.Option
+			require.NoError(t, env.db.Where(&model.Option{Key: "LianlianGateway"}).First(&stored).Error)
+			assert.Equal(t, "https://gateway.example.test/mch", stored.Value)
+		})
+	}
+
 	clearBody, err := common.Marshal(saveLianlianSettingsRequest{
 		Enabled:           false,
 		Env:               lianlianpay.EnvProd,
