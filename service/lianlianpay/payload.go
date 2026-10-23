@@ -534,8 +534,8 @@ func (payload *NotifyPayload) PayStatusValue() string {
 	return ""
 }
 
-// IsPaidStatus 判断通知状态是否为支付成功。空状态按成功处理，与连连文档中
-// 「未返回状态即已支付」的通知语义一致。
+// IsPaidStatus 判断通知或查询结果是否为支付成功。空状态不可证明已支付，
+// 由调用方保留订单并通过查询或后续回调继续确认。
 func IsPaidStatus(status string) bool {
 	trimmed := strings.ToUpper(strings.TrimSpace(status))
 	if trimmed == "" {

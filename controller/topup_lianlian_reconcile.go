@@ -139,7 +139,7 @@ func reconcileLianlianTopUp(ctx context.Context, topUp *model.TopUp, now time.Ti
 		}
 		return lianlianReconcileSkipped
 	}
-	if status == "FAILURE" || status == "CLOSED" || status == "EXPIRED" {
+	if status == "FAILURE" || status == "CLOSED" || status == "CANCEL" || status == "EXPIRED" {
 		targetStatus := common.TopUpStatusFailed
 		if status != "FAILURE" {
 			targetStatus = common.TopUpStatusExpired

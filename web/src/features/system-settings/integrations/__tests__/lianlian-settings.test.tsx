@@ -54,6 +54,7 @@ function SettingsFixture() {
     <Form {...form}>
       <LianlianSettingsSection
         values={values}
+        notifyURL='https://pay.example.test/api/user/lianlian/notify'
         onValueChange={(key, value) =>
           setValues((current) => ({ ...current, [key]: value }))
         }
@@ -100,8 +101,18 @@ describe('Lianlian settings', () => {
     )
   })
 
+  it('shows the effective notify URL supplied by the backend', () => {
+    render(<SettingsFixture />)
+
+    expect(
+      screen.getByText('https://pay.example.test/api/user/lianlian/notify')
+    ).toBeInTheDocument()
+  })
+
   it('keeps the stored private key when the write-only field is blank', () => {
-    expect(buildLianlianSettingsRequest(initialValues, initialValues)).toBeNull()
+    expect(
+      buildLianlianSettingsRequest(initialValues, initialValues)
+    ).toBeNull()
   })
 
   it('normalizes changes and allows clearing the public key', () => {

@@ -189,6 +189,7 @@ const BILLING_SECTIONS = [
           LianlianBusiType: settings.LianlianBusiType ?? '100001',
           LianlianRiskCategory: settings.LianlianRiskCategory ?? '1002',
         }}
+        lianlianNotifyURL={settings.LianlianNotifyURL ?? ''}
         waffoPancakeProvisionedStoreID={settings.WaffoPancakeStoreID ?? ''}
         waffoPancakeProvisionedProductID={settings.WaffoPancakeProductID ?? ''}
         complianceDefaults={{

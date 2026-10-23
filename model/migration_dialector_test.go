@@ -296,6 +296,17 @@ func TestMigrationSchemaStability(t *testing.T) {
 						CreateTime:      300,
 						Status:          common.TopUpStatusExpired,
 					},
+					{
+						Id:              4,
+						UserId:          7,
+						Amount:          100,
+						AmountUnit:      AmountUnitCNYCent,
+						Money:           100,
+						TradeNo:         "reconcile-create-unknown",
+						PaymentProvider: PaymentProviderLianlian,
+						CreateTime:      250,
+						Status:          common.TopUpStatusCreateUnknown,
+					},
 				}).Error)
 
 				oldDB := DB
@@ -314,10 +325,11 @@ func TestMigrationSchemaStability(t *testing.T) {
 
 				topUps, err := FindPendingTopUpsByProvider(PaymentProviderLianlian, 250, 0, 10)
 				require.NoError(t, err)
-				require.Len(t, topUps, 2)
-				assert.Equal(t, []string{"reconcile-pending", "reconcile-cancelled"}, []string{
+				require.Len(t, topUps, 3)
+				assert.Equal(t, []string{"reconcile-pending", "reconcile-cancelled", "reconcile-create-unknown"}, []string{
 					topUps[0].TradeNo,
 					topUps[1].TradeNo,
+					topUps[2].TradeNo,
 				})
 
 				hasOpen, err := HasPendingTopUpsByProvider(PaymentProviderLianlian, 250, 0)

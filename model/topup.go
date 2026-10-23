@@ -316,7 +316,7 @@ func FindPendingTopUpsByProvider(provider string, createdBefore int64, afterID i
 	}
 	query := DB.Where("payment_provider = ? AND status IN ? AND create_time <= ?",
 		provider,
-		[]string{common.TopUpStatusPending, common.TopUpStatusCancelled},
+		[]string{common.TopUpStatusCreateUnknown, common.TopUpStatusPending, common.TopUpStatusCancelled},
 		createdBefore,
 	)
 	if afterID > 0 {
@@ -332,7 +332,7 @@ func HasPendingTopUpsByProvider(provider string, createdBefore int64, createdAft
 	query := DB.Select("id").
 		Where("payment_provider = ? AND status IN ? AND create_time <= ?",
 			provider,
-			[]string{common.TopUpStatusPending, common.TopUpStatusCancelled},
+			[]string{common.TopUpStatusCreateUnknown, common.TopUpStatusPending, common.TopUpStatusCancelled},
 			createdBefore,
 		)
 	if createdAfter > 0 {
@@ -394,7 +394,7 @@ func TransitionLianlianTopUpStatus(tradeNo string, targetStatus string) (bool, e
 			return nil
 		}
 		switch topUp.Status {
-		case common.TopUpStatusPending, common.TopUpStatusCancelled:
+		case common.TopUpStatusCreateUnknown, common.TopUpStatusPending, common.TopUpStatusCancelled:
 		default:
 			return nil
 		}
@@ -529,7 +529,7 @@ func RechargeLianlian(tradeNo string, actualPaymentMethod string, callerIp strin
 			return nil
 		}
 		switch topUp.Status {
-		case common.TopUpStatusPending, common.TopUpStatusFailed, common.TopUpStatusExpired, common.TopUpStatusCancelled:
+		case common.TopUpStatusCreateUnknown, common.TopUpStatusPending, common.TopUpStatusFailed, common.TopUpStatusExpired, common.TopUpStatusCancelled:
 		default:
 			return ErrTopUpStatusInvalid
 		}
@@ -842,7 +842,7 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 		}
 
 		userId = topUp.UserId
-		payMoney = topUp.Money
+		payMoney = topUp.PayableMoney()
 		paymentMethod = topUp.PaymentMethod
 		return nil
 	})

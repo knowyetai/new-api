@@ -109,6 +109,7 @@ const defaultBillingSettings: BillingSettings = {
   LianlianMchId: '',
   LianlianPrivateKey: '',
   LianlianPrivateKeyConfigured: false,
+  LianlianNotifyURL: '',
   LianlianClearPrivateKey: false,
   LianlianPlatformPublicCert: '',
   LianlianBusiType: '100001',

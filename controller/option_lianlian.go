@@ -1,9 +1,9 @@
 package controller
 
 import (
+	"errors"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
@@ -97,27 +97,6 @@ func SaveLianlianSettings(c *gin.Context) {
 		}
 	}
 
-	configIdentityChanged := merchantID != strings.TrimSpace(setting.LianlianMchId) ||
-		env != strings.TrimSpace(setting.LianlianEnv) ||
-		gateway != strings.TrimRight(strings.TrimSpace(setting.LianlianGateway), "/") ||
-		effectivePublicKey != strings.TrimSpace(setting.GetLianlianPlatformPublicKey())
-	if configIdentityChanged {
-		hasOpenOrders, err := model.HasPendingTopUpsByProvider(
-			model.PaymentProviderLianlian,
-			time.Now().Unix()+1,
-			0,
-		)
-		if err != nil {
-			logger.LogError(c.Request.Context(), "检查连连在途订单失败: "+err.Error())
-			common.ApiErrorMsg(c, "检查连连在途订单失败")
-			return
-		}
-		if hasOpenOrders {
-			common.ApiErrorMsg(c, "存在待支付或已取消但未关闭的连连订单，暂不能切换环境、商户号、网关或平台公钥")
-			return
-		}
-	}
-
 	values := map[string]string{
 		"LianlianEnabled":            common.Interface2String(req.Enabled),
 		"LianlianEnv":                env,
@@ -128,10 +107,16 @@ func SaveLianlianSettings(c *gin.Context) {
 		"LianlianBusiType":           busiType,
 		"LianlianRiskCategory":       riskCategory,
 	}
-	if err := model.UpdateOptionsBulk(values); err != nil {
-		logger.LogError(c.Request.Context(), "保存连连支付配置失败: "+err.Error())
-		common.ApiErrorMsg(c, "保存连连支付配置失败")
-		return
+	if err := model.UpdateLianlianOptionsAtomic(values); err != nil {
+		switch {
+		case errors.Is(err, model.ErrLianlianConfigOpenOrders):
+			common.ApiErrorMsg(c, "存在创建中、待支付或已取消但未关闭的连连订单，暂不能切换环境、商户号、网关、商户私钥或平台公钥")
+			return
+		default:
+			logger.LogError(c.Request.Context(), "保存连连支付配置失败: "+err.Error())
+			common.ApiErrorMsg(c, "保存连连支付配置失败")
+			return
+		}
 	}
 
 	common.ApiSuccess(c, gin.H{

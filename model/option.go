@@ -285,6 +285,10 @@ func UpdateOptionsBulk(values map[string]string) error {
 	if err != nil {
 		return err
 	}
+	return applyOptionUpdates(values)
+}
+
+func applyOptionUpdates(values map[string]string) error {
 	for k, v := range values {
 		if err := updateOptionMap(k, v); err != nil {
 			return err

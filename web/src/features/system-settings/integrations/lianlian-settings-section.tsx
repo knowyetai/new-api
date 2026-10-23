@@ -53,6 +53,7 @@ import {
 
 interface LianlianSettingsSectionProps {
   values: LianlianSettingsValues
+  notifyURL: string
   onValueChange: <K extends keyof LianlianSettingsValues>(
     key: K,
     value: LianlianSettingsValues[K]
@@ -80,7 +81,7 @@ export function LianlianSettingsSection(props: LianlianSettingsSectionProps) {
           <li>
             {t('Webhook URL:')}{' '}
             <code className='rounded bg-blue-100 px-1 py-0.5 text-xs dark:bg-blue-900'>
-              {'<ServerAddress>/api/user/lianlian/notify'}
+              {props.notifyURL || t('Not configured')}
             </code>
           </li>
           <li>

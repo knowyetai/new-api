@@ -128,6 +128,10 @@ func GetOptions(c *gin.Context) {
 		Key:   "LianlianPrivateKeyConfigured",
 		Value: strconv.FormatBool(strings.TrimSpace(setting.LianlianPrivateKey) != ""),
 	})
+	options = append(options, &model.Option{
+		Key:   "LianlianNotifyURL",
+		Value: lianlianNotifyURL(),
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",

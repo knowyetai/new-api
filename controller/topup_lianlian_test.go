@@ -432,7 +432,7 @@ func TestRequestLianlianPayRejectsUnsignedGatewayResponse(t *testing.T) {
 	var orders []model.TopUp
 	require.NoError(t, env.db.Where("payment_provider = ?", model.PaymentProviderLianlian).Find(&orders).Error)
 	require.Len(t, orders, 1)
-	assert.Equal(t, common.TopUpStatusFailed, orders[0].Status)
+	assert.Equal(t, common.TopUpStatusCreateUnknown, orders[0].Status)
 }
 
 func TestRequestLianlianPayRejectsMismatchedGatewayOrder(t *testing.T) {
@@ -470,7 +470,7 @@ func TestRequestLianlianPayRejectsMismatchedGatewayOrder(t *testing.T) {
 			var orders []model.TopUp
 			require.NoError(t, env.db.Where("payment_provider = ?", model.PaymentProviderLianlian).Find(&orders).Error)
 			require.Len(t, orders, 1)
-			assert.Equal(t, common.TopUpStatusFailed, orders[0].Status)
+			assert.Equal(t, common.TopUpStatusCreateUnknown, orders[0].Status)
 		})
 	}
 }
@@ -528,7 +528,7 @@ func TestRequestLianlianPayMarksOrderFailedWhenGatewayRejects(t *testing.T) {
 	assert.Equal(t, common.TopUpStatusFailed, orders[0].Status)
 }
 
-func TestRequestLianlianPayMarksOrderFailedWhenCreateOutcomeIsUncertain(t *testing.T) {
+func TestRequestLianlianPayMarksOrderCreateUnknownWhenCreateOutcomeIsUncertain(t *testing.T) {
 	env := newLianlianTestEnv(t, `{"ret_code":"0000","ret_msg":"受理成功","payload":""}`)
 	router := lianlianTestRouter(lianlianTestUserID)
 
@@ -539,10 +539,17 @@ func TestRequestLianlianPayMarksOrderFailedWhenCreateOutcomeIsUncertain(t *testi
 	var orders []model.TopUp
 	require.NoError(t, env.db.Where("payment_provider = ?", model.PaymentProviderLianlian).Find(&orders).Error)
 	require.Len(t, orders, 1)
-	assert.Equal(t, common.TopUpStatusFailed, orders[0].Status)
+	assert.Equal(t, common.TopUpStatusCreateUnknown, orders[0].Status)
+	assert.Contains(t, recorder.Body.String(), `"code":"LIANLIAN_CREATE_UNKNOWN"`)
+	assert.Contains(t, recorder.Body.String(), orders[0].TradeNo)
+
+	replay := postLianlianPay(t, router, `{"amount":1000,"payment_method":"alipay"}`)
+	assert.Contains(t, replay.Body.String(), `"code":"LIANLIAN_CREATE_UNKNOWN"`)
+	assert.Contains(t, replay.Body.String(), orders[0].TradeNo)
+	assert.Equal(t, 1, env.requests)
 }
 
-func TestRequestLianlianPayMarksOrderFailedWhenGatewayIsUnavailable(t *testing.T) {
+func TestRequestLianlianPayMarksOrderCreateUnknownWhenGatewayIsUnavailable(t *testing.T) {
 	env := newLianlianTestEnv(t, lianlianTestCreatePayResponse)
 	env.gateway.Close()
 	router := lianlianTestRouter(lianlianTestUserID)
@@ -554,7 +561,7 @@ func TestRequestLianlianPayMarksOrderFailedWhenGatewayIsUnavailable(t *testing.T
 	var orders []model.TopUp
 	require.NoError(t, env.db.Where("payment_provider = ?", model.PaymentProviderLianlian).Find(&orders).Error)
 	require.Len(t, orders, 1)
-	assert.Equal(t, common.TopUpStatusFailed, orders[0].Status)
+	assert.Equal(t, common.TopUpStatusCreateUnknown, orders[0].Status)
 }
 
 func TestRequestLianlianAmountTreatsAmountAsCNYCents(t *testing.T) {
@@ -659,6 +666,7 @@ func TestSaveLianlianSettingsValidatesAndPersistsAtomically(t *testing.T) {
 	options = httptest.NewRecorder()
 	router.ServeHTTP(options, httptest.NewRequest(http.MethodGet, "/option", nil))
 	assert.Contains(t, options.Body.String(), `"key":"LianlianPrivateKeyConfigured","value":"false"`)
+	assert.Contains(t, options.Body.String(), `"key":"LianlianNotifyURL","value":"https://api.example.test/api/user/lianlian/notify"`)
 }
 
 func TestSaveLianlianSettingsBlocksIdentityChangeWithOpenOrders(t *testing.T) {
@@ -692,6 +700,38 @@ func TestSaveLianlianSettingsBlocksIdentityChangeWithOpenOrders(t *testing.T) {
 	assert.Contains(t, recorder.Body.String(), `"success":false`)
 	assert.Equal(t, "2020042200284052", setting.LianlianMchId)
 	assert.NotEqual(t, publicKey, setting.LianlianPlatformPublicCert)
+}
+
+func TestSaveLianlianSettingsBlocksPrivateKeyChangeWithOpenOrders(t *testing.T) {
+	env := newLianlianTestEnv(t, lianlianTestCreatePayResponse)
+	router := lianlianTestRouter(lianlianTestUserID)
+	require.NoError(t, env.db.Create(&model.TopUp{
+		UserId:          lianlianTestUserID,
+		Amount:          1000,
+		AmountUnit:      model.AmountUnitCNYCent,
+		Money:           1000,
+		TradeNo:         "USR77NOKEYCHANGE",
+		PaymentMethod:   lianlianpay.PayMethodAlipay,
+		PaymentProvider: model.PaymentProviderLianlian,
+		CreateTime:      time.Now().Unix(),
+		Status:          common.TopUpStatusCreateUnknown,
+	}).Error)
+	newPrivateKey, _ := newTestRSAKeyPEM(t)
+	body, err := common.Marshal(saveLianlianSettingsRequest{
+		Enabled:           true,
+		Env:               setting.LianlianEnv,
+		Gateway:           setting.LianlianGateway,
+		MerchantID:        setting.LianlianMchId,
+		PrivateKey:        newPrivateKey,
+		PlatformPublicKey: setting.LianlianPlatformPublicCert,
+		BusiType:          setting.LianlianBusiType,
+		RiskCategory:      setting.LianlianRiskCategory,
+	})
+	require.NoError(t, err)
+
+	recorder := lianlianTestPost(t, router, "/option/lianlian/save", string(body))
+	assert.Contains(t, recorder.Body.String(), "暂不能切换")
+	assert.NotEqual(t, strings.TrimSpace(newPrivateKey), setting.LianlianPrivateKey)
 }
 
 func TestGenericOptionUpdateCannotBypassLianlianValidation(t *testing.T) {
@@ -1014,6 +1054,7 @@ func TestLianlianNotifySettlesAfterTopUpDisabled(t *testing.T) {
 
 func TestLianlianNotifyCanSettleRecoverableOrderStates(t *testing.T) {
 	for _, initialStatus := range []string{
+		common.TopUpStatusCreateUnknown,
 		common.TopUpStatusFailed,
 		common.TopUpStatusExpired,
 		common.TopUpStatusCancelled,
@@ -1148,7 +1189,11 @@ func TestLianlianOrderExpiresAfterTTL(t *testing.T) {
 	router := lianlianTestRouter(lianlianTestUserID)
 	createdAt := time.Now().Add(-time.Duration(lianlianOrderTTLSeconds+1) * time.Second).Unix()
 
-	for _, status := range []string{common.TopUpStatusPending, common.TopUpStatusCancelled} {
+	for _, status := range []string{
+		common.TopUpStatusCreateUnknown,
+		common.TopUpStatusPending,
+		common.TopUpStatusCancelled,
+	} {
 		t.Run(status, func(t *testing.T) {
 			tradeNo := "USR77NOEXPIRE" + strings.ToUpper(status)
 			require.NoError(t, env.db.Create(&model.TopUp{
@@ -1272,6 +1317,10 @@ func TestManualCompleteLianlianTopUpUsesAmountCents(t *testing.T) {
 	user, err := model.GetUserById(lianlianTestUserID, false)
 	require.NoError(t, err)
 	assert.Equal(t, 1000+684932, user.Quota)
+
+	var topUpLog model.Log
+	require.NoError(t, model.LOG_DB.Order("id desc").First(&topUpLog).Error)
+	assert.Contains(t, topUpLog.Content, "支付金额：10.000000")
 }
 
 func TestReconcileLianlianTopUpsSettlesPaidPendingOrder(t *testing.T) {
@@ -1410,6 +1459,12 @@ func TestReconcileLianlianTopUpsClosesTerminalOrders(t *testing.T) {
 			tradeSuffix:    "FAILED",
 			queryResponse:  `{"ret_code":"0000","ret_msg":"成功","mch_id":%q,"pay_type":"ALIPAY_NATIVE","txn_seqno":%q,"platform_txno":"LLFAILED","txn_status":"FAILURE"}`,
 			expectedStatus: common.TopUpStatusFailed,
+		},
+		{
+			name:           "provider cancelled",
+			tradeSuffix:    "CANCEL",
+			queryResponse:  `{"ret_code":"0000","ret_msg":"成功","mch_id":%q,"pay_type":"ALIPAY_NATIVE","txn_seqno":%q,"platform_txno":"LLCANCEL","txn_status":"CANCEL"}`,
+			expectedStatus: common.TopUpStatusExpired,
 		},
 		{
 			name:           "provider expired",

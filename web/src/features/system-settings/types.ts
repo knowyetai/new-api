@@ -340,6 +340,7 @@ export type BillingSettings = {
   LianlianMchId: string
   LianlianPrivateKey: string
   LianlianPrivateKeyConfigured: boolean
+  LianlianNotifyURL: string
   LianlianClearPrivateKey: boolean
   LianlianPlatformPublicCert: string
   LianlianBusiType: string

@@ -259,9 +259,10 @@ const (
 )
 
 const (
-	TopUpStatusPending   = "pending"
-	TopUpStatusSuccess   = "success"
-	TopUpStatusFailed    = "failed"
-	TopUpStatusExpired   = "expired"
-	TopUpStatusCancelled = "cancelled"
+	TopUpStatusCreateUnknown = "create_unknown"
+	TopUpStatusPending       = "pending"
+	TopUpStatusSuccess       = "success"
+	TopUpStatusFailed        = "failed"
+	TopUpStatusExpired       = "expired"
+	TopUpStatusCancelled     = "cancelled"
 )

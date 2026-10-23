@@ -34,6 +34,16 @@ const lianlianMinAmountCents int64 = 1
 
 const lianlianIdempotencyKeyHeader = "Idempotency-Key"
 
+var (
+	errLianlianCreateRejected      = errors.New("lianlian create rejected")
+	errLianlianCreateConfigInvalid = errors.New("lianlian create config invalid")
+)
+
+func lianlianNotifyURL() string {
+	callbackBase := strings.TrimRight(strings.TrimSpace(service.GetCallbackAddress()), "/")
+	return callbackBase + "/api/user/lianlian/notify"
+}
+
 type LianlianPayRequest struct {
 	// Amount is the legacy CNY-cent field. New clients should use AmountCents.
 	Amount *int64 `json:"amount"`
@@ -164,7 +174,7 @@ func RequestLianlianAmount(c *gin.Context) {
 
 // RequestLianlianPay 创建本地订单并向连连下单，返回扫码串供前端渲染二维码。
 func RequestLianlianPay(c *gin.Context) {
-	if !isLianlianTopUpEnabled() {
+	if !isPaymentComplianceConfirmed() {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值服务未启用"})
 		return
 	}
@@ -205,14 +215,6 @@ func RequestLianlianPay(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值金额不能小于 0.01 元"})
 		return
 	}
-	// 网关地址是管理员配置项：先校验再建单，避免留下注定失败的订单，
-	// 具体原因只写入服务端日志，前端统一返回中性提示。
-	if _, err := lianlianpay.GatewayURL(setting.LianlianEnv, setting.LianlianGateway); err != nil {
-		logger.LogError(c.Request.Context(), fmt.Sprintf("连连 网关地址配置错误 user_id=%d gateway=%q error=%q", c.GetInt("id"), setting.LianlianGateway, err.Error()))
-		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "支付服务暂时不可用"})
-		return
-	}
-
 	id := c.GetInt("id")
 	existing, err := model.GetLianlianTopUpByRequestID(id, req.RequestID)
 	if err != nil {
@@ -244,8 +246,7 @@ func RequestLianlianPay(c *gin.Context) {
 		return
 	}
 	moneyCNY := decimal.NewFromInt(moneyCents).Shift(-2)
-	callbackBase := strings.TrimRight(strings.TrimSpace(service.GetCallbackAddress()), "/")
-	notifyURL := callbackBase + "/api/user/lianlian/notify"
+	notifyURL := lianlianNotifyURL()
 	parsedNotifyURL, err := url.Parse(notifyURL)
 	if err != nil || parsedNotifyURL.Scheme != "https" || parsedNotifyURL.Host == "" {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("连连 回调地址配置错误 user_id=%d notify_url=%q", id, notifyURL))
@@ -268,11 +269,56 @@ func RequestLianlianPay(c *gin.Context) {
 		PaymentMethod:     req.PaymentMethod,
 		PaymentProvider:   model.PaymentProviderLianlian,
 		CreateTime:        time.Now().Unix(),
-		Status:            common.TopUpStatusPending,
+		Status:            common.TopUpStatusCreateUnknown,
 	}
-	if err := topUp.Insert(); err != nil {
+
+	var signed *lianlianpay.SignedRequest
+	config, err := model.CreateLianlianTopUpWithConfigLock(topUp, func(config model.LianlianPaymentConfig) error {
+		registeredAt := ""
+		if user.CreatedAt > 0 {
+			registeredAt = lianlianpay.FormatTimestamp(time.Unix(user.CreatedAt, 0))
+		}
+		var err error
+		signed, err = lianlianpay.BuildCreatePayRequest(lianlianpay.CreatePayRequest{
+			Env:          config.Env,
+			Gateway:      config.Gateway,
+			PrivateKey:   config.PrivateKey,
+			MerchantID:   config.MerchantID,
+			BusiType:     config.BusiType,
+			UserID:       strconv.Itoa(id),
+			Username:     user.Username,
+			UserEmail:    user.Email,
+			Registered:   registeredAt,
+			RiskCategory: config.RiskCategory,
+			TradeNo:      tradeNo,
+			Money:        moneyCNY.StringFixed(2),
+			GoodsName:    fmt.Sprintf("NewAPI 充值 %s", moneyCNY.StringFixed(2)),
+			NotifyURL:    notifyURL,
+			ClientIP:     c.ClientIP(),
+			PayMethod:    req.PaymentMethod,
+			Timestamp:    lianlianpay.NowTimestamp(),
+		})
+		if err != nil {
+			return fmt.Errorf("%w: %v", errLianlianCreateConfigInvalid, err)
+		}
+		return nil
+	})
+	if err != nil {
 		existing, lookupErr := model.GetLianlianTopUpByRequestID(id, req.RequestID)
 		if lookupErr == nil && replayLianlianOrder(c, existing, amountCents, req.PaymentMethod) {
+			return
+		}
+		switch {
+		case errors.Is(err, model.ErrLianlianPaymentDisabled):
+			c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值服务未启用"})
+			return
+		case errors.Is(err, model.ErrLianlianPaymentConfigIncomplete):
+			logger.LogError(c.Request.Context(), fmt.Sprintf("连连 支付配置不完整 user_id=%d error=%q", id, err.Error()))
+			c.JSON(http.StatusOK, gin.H{"message": "error", "data": "支付服务暂时不可用"})
+			return
+		case errors.Is(err, errLianlianCreateConfigInvalid):
+			logger.LogError(c.Request.Context(), fmt.Sprintf("连连 构造下单参数失败 user_id=%d error=%q", id, err.Error()))
+			c.JSON(http.StatusOK, gin.H{"message": "error", "data": "支付服务暂时不可用"})
 			return
 		}
 		logger.LogError(c.Request.Context(), fmt.Sprintf("连连 创建充值订单失败 user_id=%d trade_no=%s amount_cents=%d error=%q", id, tradeNo, amountCents, err.Error()))
@@ -280,54 +326,42 @@ func RequestLianlianPay(c *gin.Context) {
 		return
 	}
 
-	registeredAt := ""
-	if user.CreatedAt > 0 {
-		registeredAt = lianlianpay.FormatTimestamp(time.Unix(user.CreatedAt, 0))
-	}
-	signed, err := lianlianpay.BuildCreatePayRequest(lianlianpay.CreatePayRequest{
-		Env:          setting.LianlianEnv,
-		Gateway:      setting.LianlianGateway,
-		PrivateKey:   setting.LianlianPrivateKey,
-		MerchantID:   setting.LianlianMchId,
-		BusiType:     setting.LianlianBusiType,
-		UserID:       strconv.Itoa(id),
-		Username:     user.Username,
-		UserEmail:    user.Email,
-		Registered:   registeredAt,
-		RiskCategory: setting.LianlianRiskCategory,
-		TradeNo:      tradeNo,
-		Money:        moneyCNY.StringFixed(2),
-		GoodsName:    fmt.Sprintf("NewAPI 充值 %s", moneyCNY.StringFixed(2)),
-		NotifyURL:    notifyURL,
-		ClientIP:     c.ClientIP(),
-		PayMethod:    req.PaymentMethod,
-		Timestamp:    lianlianpay.NowTimestamp(),
-	})
-	if err != nil {
-		logger.LogError(c.Request.Context(), fmt.Sprintf("连连 构造下单报文失败 user_id=%d trade_no=%s error=%q", id, tradeNo, err.Error()))
-		markTopUpFailed(topUp)
-		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "拉起支付失败"})
-		return
-	}
-
-	result, err := createLianlianPayment(c, signed, tradeNo, moneyCents)
+	result, err := createLianlianPayment(
+		c.Request.Context(),
+		signed,
+		tradeNo,
+		moneyCents,
+		config.MerchantID,
+		lianlianpay.ResolvePlatformKey(config.PlatformPublicKey),
+	)
 	if err != nil {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("连连 拉起支付失败 user_id=%d trade_no=%s payment_method=%s amount_cents=%d error=%q", id, tradeNo, req.PaymentMethod, amountCents, err.Error()))
-		markTopUpFailed(topUp)
-		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "拉起支付失败"})
+		if errors.Is(err, errLianlianCreateRejected) {
+			markTopUpFailed(topUp)
+			c.JSON(http.StatusOK, gin.H{
+				"message": "error",
+				"code":    "LIANLIAN_ORDER_REJECTED",
+				"data":    "连连拒绝创建订单",
+			})
+			return
+		}
+		topUp.Status = common.TopUpStatusCreateUnknown
+		writeLianlianCreateUnknownResponse(c, topUp)
 		return
 	}
 
 	providerTradeNo := strings.TrimSpace(result.PlatformTxNo)
 	result.QRCode = strings.TrimSpace(result.QRCode)
-	if err := model.UpdateLianlianPaymentResult(tradeNo, providerTradeNo, result.QRCode); err != nil {
+	completed, err := model.CompleteLianlianOrderCreation(tradeNo, providerTradeNo, result.QRCode)
+	if err != nil {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("连连 保存可重试支付信息失败 trade_no=%s provider_trade_no=%s error=%q", tradeNo, providerTradeNo, err.Error()))
+		topUp.Status = common.TopUpStatusCreateUnknown
+		writeLianlianCreateUnknownResponse(c, topUp)
+		return
 	}
-	topUp.ProviderTradeNo = providerTradeNo
-	topUp.LianlianQRCode = result.QRCode
 
 	logger.LogInfo(c.Request.Context(), fmt.Sprintf("连连 充值订单创建成功 user_id=%d trade_no=%s request_id=%s provider_trade_no=%s payment_method=%s amount_cents=%d payable_amount_cents=%d", id, tradeNo, req.RequestID, providerTradeNo, req.PaymentMethod, topUp.Amount, moneyCents))
-	writeLianlianOrderResponse(c, topUp)
+	writeLianlianOrderResponse(c, completed)
 }
 
 // replayLianlianOrder returns the original order for an idempotency key. A
@@ -349,16 +383,26 @@ func replayLianlianOrder(c *gin.Context, topUp *model.TopUp, amountCents int64, 
 		return true
 	}
 	topUp, _ = expireLianlianTopUpIfNeeded(c.Request.Context(), topUp, common.GetTimestamp())
-	if topUp.Status == common.TopUpStatusPending && topUp.LianlianQRCode == "" {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "error",
-			"code":    "LIANLIAN_ORDER_CREATING",
-			"data":    "订单正在创建中，请稍后重试",
-		})
+	if topUp.Status == common.TopUpStatusCreateUnknown ||
+		(topUp.Status == common.TopUpStatusPending && topUp.LianlianQRCode == "") {
+		writeLianlianCreateUnknownResponse(c, topUp)
 		return true
 	}
 	writeLianlianOrderResponse(c, topUp)
 	return true
+}
+
+func writeLianlianCreateUnknownResponse(c *gin.Context, topUp *model.TopUp) {
+	c.JSON(http.StatusOK, gin.H{
+		"message": "error",
+		"code":    "LIANLIAN_CREATE_UNKNOWN",
+		"data": gin.H{
+			"trade_no":            topUp.TradeNo,
+			"status":              common.TopUpStatusCreateUnknown,
+			"can_pay":             false,
+			"retry_after_seconds": 2,
+		},
+	})
 }
 
 func writeLianlianOrderResponse(c *gin.Context, topUp *model.TopUp) {
@@ -397,18 +441,28 @@ func writeLianlianOrderResponse(c *gin.Context, topUp *model.TopUp) {
 }
 
 // createLianlianPayment 发送下单请求并解析应答。
-func createLianlianPayment(c *gin.Context, signed *lianlianpay.SignedRequest, expectedTradeNo string, expectedMoneyCents int64) (*lianlianpay.CreatePayResult, error) {
-	body, err := postSignedLianlianRequest(c.Request.Context(), signed, setting.GetLianlianPlatformPublicKey())
+func createLianlianPayment(
+	ctx context.Context,
+	signed *lianlianpay.SignedRequest,
+	expectedTradeNo string,
+	expectedMoneyCents int64,
+	expectedMerchantID string,
+	platformPublicKey string,
+) (*lianlianpay.CreatePayResult, error) {
+	body, err := postSignedLianlianRequest(ctx, signed, platformPublicKey)
 	if err != nil {
 		return nil, err
 	}
 	result, err := lianlianpay.ParseCreatePayResponse(body)
 	if err != nil {
+		if result != nil && result.RetCode != "" && result.RetCode != lianlianpay.RetCodeSuccess {
+			return result, fmt.Errorf("%w: %v", errLianlianCreateRejected, err)
+		}
 		return result, err
 	}
 	providerTradeNo := strings.TrimSpace(result.PlatformTxNo)
 	responseAmount, amountErr := decimal.NewFromString(strings.TrimSpace(result.OrderAmount))
-	if strings.TrimSpace(result.MchID) != strings.TrimSpace(setting.LianlianMchId) ||
+	if strings.TrimSpace(result.MchID) != strings.TrimSpace(expectedMerchantID) ||
 		strings.TrimSpace(result.TxnSeqno) != expectedTradeNo ||
 		providerTradeNo == "" ||
 		len(providerTradeNo) > 128 ||
@@ -461,14 +515,7 @@ func markTopUpFailed(topUp *model.TopUp) {
 	if topUp == nil {
 		return
 	}
-	err := model.UpdatePendingTopUpStatus(
-		topUp.TradeNo,
-		model.PaymentProviderLianlian,
-		common.TopUpStatusFailed,
-	)
-	if errors.Is(err, model.ErrTopUpStatusInvalid) {
-		return
-	}
+	_, err := model.TransitionLianlianTopUpStatus(topUp.TradeNo, common.TopUpStatusFailed)
 	if err != nil {
 		common.SysError("failed to mark lianlian topup as failed: " + err.Error())
 	}
@@ -497,7 +544,9 @@ func getOwnedLianlianTopUp(c *gin.Context) (*model.TopUp, bool) {
 
 func expireLianlianTopUpIfNeeded(ctx context.Context, topUp *model.TopUp, now int64) (*model.TopUp, bool) {
 	if topUp == nil ||
-		(topUp.Status != common.TopUpStatusPending && topUp.Status != common.TopUpStatusCancelled) ||
+		(topUp.Status != common.TopUpStatusCreateUnknown &&
+			topUp.Status != common.TopUpStatusPending &&
+			topUp.Status != common.TopUpStatusCancelled) ||
 		topUp.CreateTime <= 0 ||
 		topUp.CreateTime+lianlianOrderTTLSeconds > now {
 		return topUp, false
@@ -531,6 +580,8 @@ func GetLianlianOrder(c *gin.Context) {
 	paymentHint := ""
 	switch {
 	case canPay:
+	case topUp.Status == common.TopUpStatusCreateUnknown:
+		paymentHint = "订单创建结果待确认，请稍后查询"
 	case topUp.Status == common.TopUpStatusCancelled:
 		paymentHint = "订单已取消，请重新创建订单"
 	case topUp.Status == common.TopUpStatusFailed:
@@ -591,7 +642,8 @@ func CancelLianlianOrder(c *gin.Context) {
 		})
 		return
 	}
-	if topUp.Status != common.TopUpStatusPending {
+	if topUp.Status != common.TopUpStatusPending &&
+		topUp.Status != common.TopUpStatusCreateUnknown {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "当前订单状态不可取消"})
 		return
 	}

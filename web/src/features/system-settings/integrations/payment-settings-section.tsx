@@ -258,6 +258,7 @@ type PaymentSettingsSectionProps = {
   waffoDefaultValues: WaffoSettingsValues
   waffoPancakeDefaultValues: WaffoPancakeSettingsValues
   lianlianDefaultValues: LianlianSettingsValues
+  lianlianNotifyURL: string
   waffoPancakeProvisionedStoreID?: string
   waffoPancakeProvisionedProductID?: string
   complianceDefaults: PaymentComplianceDefaults
@@ -277,6 +278,7 @@ export function PaymentSettingsSection({
   waffoDefaultValues,
   waffoPancakeDefaultValues,
   lianlianDefaultValues,
+  lianlianNotifyURL,
   waffoPancakeProvisionedStoreID,
   waffoPancakeProvisionedProductID,
   complianceDefaults,
@@ -1748,6 +1750,7 @@ export function PaymentSettingsSection({
               <LianlianSettingsSection
                 values={lianlianValues}
                 onValueChange={setLianlianValue}
+                notifyURL={lianlianNotifyURL}
               />
             </TabsContent>
 
