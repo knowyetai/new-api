@@ -171,7 +171,12 @@ func TestBuildCreatePayBody(t *testing.T) {
 		"goods_price":    "1.00",
 	}}, body["goods_info"])
 	assert.Equal(t, map[string]any{"device_id": DefaultDeviceIDPrefix + "42", "device_type": "PC", "device_ip": "1.2.3.4"}, body["device_info"])
-	assert.NotContains(t, body, "payee_infos")
+	assert.Equal(t, []map[string]any{{
+		"payee_type":     "MCH",
+		"payee_accttype": "MCHOWN",
+		"payee_uid":      "2020042200284052",
+		"payee_amount":   "1.00",
+	}}, body["payee_infos"])
 	assert.Contains(t, body["risk_item"], "frms_ware_category")
 	assert.Contains(t, body["risk_item"], `"user_info_mercht_userno":"42"`)
 	assert.Contains(t, body["risk_item"], `"frms_ware_category":"2001"`)
@@ -192,6 +197,12 @@ func TestBuildCreatePayBodyMapsWxpayAndIPV6Loopback(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, PayTypeWechatNative, body["pay_method_infos"].([]map[string]any)[0]["pay_type"])
+	assert.Equal(t, []map[string]any{{
+		"payee_type":     "MCH",
+		"payee_accttype": "MCHOWN",
+		"payee_uid":      "m",
+		"payee_amount":   "2.00",
+	}}, body["payee_infos"])
 	assert.Equal(t, "127.0.0.1", body["device_info"].(map[string]any)["device_ip"])
 }
 
@@ -237,6 +248,16 @@ func TestBuildCreatePayRequestSignsExactBody(t *testing.T) {
 	assert.Equal(t, GatewayTest+CreatePayPath, signed.URL)
 	assert.Equal(t, "20260101120000", signed.Timestamp)
 	assert.Equal(t, "2020042200284052", signed.MerchantID)
+	var body struct {
+		PayeeInfos []map[string]string `json:"payee_infos"`
+	}
+	require.NoError(t, common.Unmarshal(signed.Body, &body))
+	assert.Equal(t, []map[string]string{{
+		"payee_type":     "MCH",
+		"payee_accttype": "MCHOWN",
+		"payee_uid":      "2020042200284052",
+		"payee_amount":   "0.01",
+	}}, body.PayeeInfos)
 
 	ok, err := Verify(docSamplePubKey, signed.Body, signed.Signature)
 	require.NoError(t, err)
