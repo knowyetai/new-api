@@ -505,6 +505,16 @@ func postSignedLianlianRequest(ctx context.Context, signed *lianlianpay.SignedRe
 		return nil, fmt.Errorf("连连响应验签失败: %w", err)
 	}
 	if !verified {
+		var diagnostic struct {
+			RetCode string `json:"ret_code"`
+			RetMsg  string `json:"ret_msg"`
+		}
+		if common.Unmarshal(body, &diagnostic) == nil && diagnostic.RetCode != "" {
+			code := []rune(strings.TrimSpace(diagnostic.RetCode))
+			message := []rune(strings.TrimSpace(diagnostic.RetMsg))
+			return nil, fmt.Errorf("连连响应签名无效; 未验证的响应 ret_code=%q ret_msg=%q",
+				string(code[:min(len(code), 32)]), string(message[:min(len(message), 160)]))
+		}
 		return nil, errors.New("连连响应签名无效")
 	}
 	return body, nil

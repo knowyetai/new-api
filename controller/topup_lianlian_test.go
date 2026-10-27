@@ -528,6 +528,26 @@ func TestRequestLianlianPayMarksOrderFailedWhenGatewayRejects(t *testing.T) {
 	assert.Equal(t, common.TopUpStatusFailed, orders[0].Status)
 }
 
+func TestRequestLianlianPayKeepsUnsignedGatewayErrorUnconfirmed(t *testing.T) {
+	env := newLianlianTestEnv(t, `{"ret_code":"1007","ret_msg":"获取商户信息失败"}`)
+	env.signResponses = false
+
+	_, err := postSignedLianlianRequest(context.Background(), &lianlianpay.SignedRequest{
+		URL:        env.gateway.URL + "/mch" + lianlianpay.CreatePayPath,
+		Body:       []byte(`{}`),
+		MerchantID: setting.LianlianMchId,
+	}, setting.LianlianPlatformPublicCert)
+	require.ErrorContains(t, err, "连连响应签名无效")
+	assert.ErrorContains(t, err, `未验证的响应 ret_code="1007" ret_msg="获取商户信息失败"`)
+
+	recorder := postLianlianPay(t, lianlianTestRouter(lianlianTestUserID), `{"amount":1000,"payment_method":"alipay"}`)
+	assert.Contains(t, recorder.Body.String(), `"code":"LIANLIAN_CREATE_UNKNOWN"`)
+	var orders []model.TopUp
+	require.NoError(t, env.db.Where("payment_provider = ?", model.PaymentProviderLianlian).Find(&orders).Error)
+	require.Len(t, orders, 1)
+	assert.Equal(t, common.TopUpStatusCreateUnknown, orders[0].Status)
+}
+
 func TestRequestLianlianPayMarksOrderCreateUnknownWhenCreateOutcomeIsUncertain(t *testing.T) {
 	env := newLianlianTestEnv(t, `{"ret_code":"0000","ret_msg":"受理成功","payload":""}`)
 	router := lianlianTestRouter(lianlianTestUserID)
