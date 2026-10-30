@@ -219,14 +219,6 @@ func BuildCreatePayBody(req CreatePayRequest) (map[string]any, error) {
 		"pay_method_infos": []map[string]any{
 			{"pay_type": payType, "amount": money},
 		},
-		"payee_infos": []map[string]any{
-			{
-				"payee_type":     "MCH",
-				"payee_accttype": "MCHOWN",
-				"payee_uid":      merchantID,
-				"payee_amount":   money,
-			},
-		},
 		"goods_info": []map[string]any{
 			{
 				"goods_id":       "API_CREDIT",
