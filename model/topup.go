@@ -4,28 +4,39 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 )
 
 type TopUp struct {
-	BillingUnitId   int     `json:"billing_unit_id" gorm:"index;default:0"`
-	OperatorUserId  int     `json:"operator_user_id" gorm:"index;default:0"`
-	Id              int     `json:"id"`
-	UserId          int     `json:"user_id" gorm:"index"`
-	Amount          int64   `json:"amount"`
-	Money           float64 `json:"money"`
-	TradeNo         string  `json:"trade_no" gorm:"unique;type:varchar(255);index"`
-	PaymentMethod   string  `json:"payment_method" gorm:"type:varchar(50)"`
-	PaymentProvider string  `json:"payment_provider" gorm:"type:varchar(50);default:''"`
-	CreateTime      int64   `json:"create_time"`
-	CompleteTime    int64   `json:"complete_time"`
-	Status          string  `json:"status"`
+	BillingUnitId     int        `json:"billing_unit_id" gorm:"index;default:0"`
+	OperatorUserId    int        `json:"operator_user_id" gorm:"index;default:0"`
+	Id                int        `json:"id"`
+	UserId            int        `json:"user_id" gorm:"index;uniqueIndex:idx_top_ups_user_lianlian_request_id,priority:1"`
+	Amount            int64      `json:"amount"`
+	AmountUnit        AmountUnit `json:"amount_unit" gorm:"type:varchar(16);default:''"`
+	Money             float64    `json:"money"` // Lianlian stores payable money in CNY cents; API responses use yuan.
+	ProviderTradeNo   string     `json:"provider_trade_no" gorm:"type:varchar(128);default:''"`
+	LianlianRequestID *string    `json:"-" gorm:"type:varchar(64);uniqueIndex:idx_top_ups_user_lianlian_request_id,priority:2"`
+	LianlianQRCode    string     `json:"-" gorm:"type:text"`
+	TradeNo           string     `json:"trade_no" gorm:"unique;type:varchar(255);index"`
+	PaymentMethod     string     `json:"payment_method" gorm:"type:varchar(50)"`
+	PaymentProvider   string     `json:"payment_provider" gorm:"type:varchar(50);default:'';index:idx_top_ups_provider_status_create_time,priority:1"`
+	CreateTime        int64      `json:"create_time" gorm:"index:idx_top_ups_provider_status_create_time,priority:3"`
+	CompleteTime      int64      `json:"complete_time"`
+	Status            string     `json:"status" gorm:"index:idx_top_ups_provider_status_create_time,priority:2"`
 }
+
+const (
+	TopUpProviderStatusCreateTimeIndex = "idx_top_ups_provider_status_create_time"
+	topUpUserLianlianRequestIDIndex    = "idx_top_ups_user_lianlian_request_id"
+)
 
 const (
 	PaymentMethodStripe       = "stripe"
@@ -41,16 +52,30 @@ const (
 	PaymentProviderCreem        = "creem"
 	PaymentProviderWaffo        = "waffo"
 	PaymentProviderWaffoPancake = "waffo_pancake"
+	PaymentProviderLianlian     = "lianlian"
 	PaymentProviderBalance      = "balance"
 )
 
+type AmountUnit string
+
+const (
+	AmountUnitUSDCent AmountUnit = "USD_CENT"
+	AmountUnitCNYCent AmountUnit = "CNY_CENT"
+	AmountUnitUSD     AmountUnit = "USD"
+	AmountUnitQuota   AmountUnit = "QUOTA"
+
+	amountMinorUnitScale int64 = 100
+)
+
 var (
-	ErrPaymentMethodMismatch    = errors.New("payment method mismatch")
-	ErrTopUpNotFound            = errors.New("topup not found")
-	ErrTopUpStatusInvalid       = errors.New("topup status invalid")
-	ErrInvalidTopUpQuota        = errors.New("invalid top-up quota")
-	ErrTopUpQuotaLimitExceeded  = errors.New("top-up quota limit exceeded")
-	ErrWalletQuotaLimitExceeded = errors.New("wallet quota limit exceeded")
+	ErrPaymentMethodMismatch     = errors.New("payment method mismatch")
+	ErrTopUpNotFound             = errors.New("topup not found")
+	ErrTopUpStatusInvalid        = errors.New("topup status invalid")
+	ErrInvalidTopUpQuota         = errors.New("invalid top-up quota")
+	ErrTopUpQuotaLimitExceeded   = errors.New("top-up quota limit exceeded")
+	ErrWalletQuotaLimitExceeded  = errors.New("wallet quota limit exceeded")
+	ErrInvalidAmountUnit         = errors.New("invalid top-up amount unit")
+	ErrInvalidAmountExchangeRate = errors.New("invalid top-up amount exchange rate")
 )
 
 func (topUp *TopUp) Insert() error {
@@ -144,6 +169,126 @@ func GetTopUpByTradeNo(tradeNo string) *TopUp {
 	return topUp
 }
 
+// GetLianlianTopUpByRequestID returns the order previously created for a
+// user's idempotency key.
+func GetLianlianTopUpByRequestID(userID int, requestID string) (*TopUp, error) {
+	var topUp TopUp
+	err := DB.Where("user_id = ? AND lianlian_request_id = ?", userID, requestID).
+		First(&topUp).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &topUp, nil
+}
+
+// EffectiveAmountUnit preserves legacy Amount semantics for rows created before
+// AmountUnit was introduced.
+func (topUp *TopUp) EffectiveAmountUnit() AmountUnit {
+	if topUp == nil {
+		return ""
+	}
+	if topUp.AmountUnit != "" {
+		return topUp.AmountUnit
+	}
+	switch topUp.PaymentProvider {
+	case PaymentProviderCreem:
+		return AmountUnitQuota
+	case PaymentProviderLianlian:
+		// Lianlian orders must state whether Amount is CNY or USD cents. Guessing
+		// can over-credit a CNY wallet by the exchange-rate multiplier.
+		return ""
+	default:
+		return AmountUnitUSD
+	}
+}
+
+// QuotaAmount converts the stored top-up amount into the quota that should be
+// credited. CNY amounts use the current configured exchange rate at settlement.
+func (topUp *TopUp) QuotaAmount() (decimal.Decimal, error) {
+	if topUp == nil {
+		return decimal.Zero, ErrInvalidAmountUnit
+	}
+	switch topUp.EffectiveAmountUnit() {
+	case AmountUnitQuota:
+		return decimal.NewFromInt(topUp.Amount), nil
+	case AmountUnitUSD:
+		return decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)), nil
+	case AmountUnitUSDCent:
+		return decimal.NewFromInt(topUp.Amount).
+			Div(decimal.NewFromInt(amountMinorUnitScale)).
+			Mul(decimal.NewFromFloat(common.QuotaPerUnit)), nil
+	case AmountUnitCNYCent:
+		exchangeRate := operation_setting.USDExchangeRate
+		if exchangeRate <= 0 {
+			return decimal.Zero, ErrInvalidAmountExchangeRate
+		}
+		return decimal.NewFromInt(topUp.Amount).
+			Div(decimal.NewFromInt(amountMinorUnitScale)).
+			Div(decimal.NewFromFloat(exchangeRate)).
+			Mul(decimal.NewFromFloat(common.QuotaPerUnit)), nil
+	default:
+		return decimal.Zero, ErrInvalidAmountUnit
+	}
+}
+
+// Quota converts the stored top-up amount into the wallet quota to credit.
+func (topUp *TopUp) Quota() (int, error) {
+	quota, err := topUp.QuotaAmount()
+	if err != nil {
+		return 0, err
+	}
+	return common.WalletQuotaFromDecimalStrict(quota)
+}
+
+// PayableMoney returns Money in the public top-up record contract. Lianlian
+// stores exact cents internally, while callers expect an actual money amount.
+func (topUp *TopUp) PayableMoney() float64 {
+	if topUp == nil {
+		return 0
+	}
+	if topUp.PaymentProvider == PaymentProviderLianlian {
+		return topUp.Money / float64(amountMinorUnitScale)
+	}
+	return topUp.Money
+}
+
+// FindPendingTopUpsByProvider returns a keyset page of pending or
+// user-cancelled orders old enough for an upstream status check.
+func FindPendingTopUpsByProvider(provider string, createdBefore int64, afterID int, limit int) ([]TopUp, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	query := DB.Where("payment_provider = ? AND status IN ? AND create_time <= ?",
+		provider,
+		[]string{common.TopUpStatusCreateUnknown, common.TopUpStatusPending, common.TopUpStatusCancelled},
+		createdBefore,
+	)
+	if afterID > 0 {
+		query = query.Where("id > ?", afterID)
+	}
+	var topUps []TopUp
+	err := query.Order("id asc").Limit(limit).Find(&topUps).Error
+	return topUps, err
+}
+
+func HasPendingTopUpsByProvider(provider string, createdBefore int64, createdAfter int64) (bool, error) {
+	var topUp TopUp
+	query := DB.Select("id").
+		Where("payment_provider = ? AND status IN ? AND create_time <= ?",
+			provider,
+			[]string{common.TopUpStatusCreateUnknown, common.TopUpStatusPending, common.TopUpStatusCancelled},
+			createdBefore,
+		)
+	if createdAfter > 0 {
+		query = query.Where("create_time > ?", createdAfter)
+	}
+	err := query.Limit(1).Find(&topUp).Error
+	return topUp.Id > 0, err
+}
+
 func UpdatePendingTopUpStatus(tradeNo string, expectedPaymentProvider string, targetStatus string) error {
 	if tradeNo == "" {
 		return errors.New("未提供支付单号")
@@ -169,6 +314,43 @@ func UpdatePendingTopUpStatus(tradeNo string, expectedPaymentProvider string, ta
 		topUp.Status = targetStatus
 		return tx.Save(topUp).Error
 	})
+}
+
+// TransitionLianlianTopUpStatus moves a recoverable Lianlian order to the
+// requested state. It is used for local cancellation and provider-confirmed
+// terminal states; successful callbacks can still settle the order afterwards.
+func TransitionLianlianTopUpStatus(tradeNo string, targetStatus string) (bool, error) {
+	if tradeNo == "" {
+		return false, errors.New("未提供支付单号")
+	}
+
+	refCol := "`trade_no`"
+	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+		refCol = `"trade_no"`
+	}
+
+	updated := false
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		topUp := &TopUp{}
+		if err := lockForUpdate(tx).Where(refCol+" = ?", tradeNo).First(topUp).Error; err != nil {
+			return ErrTopUpNotFound
+		}
+		if topUp.PaymentProvider != PaymentProviderLianlian {
+			return ErrPaymentMethodMismatch
+		}
+		if topUp.Status == targetStatus {
+			return nil
+		}
+		switch topUp.Status {
+		case common.TopUpStatusCreateUnknown, common.TopUpStatusPending, common.TopUpStatusCancelled:
+		default:
+			return nil
+		}
+		topUp.Status = targetStatus
+		updated = true
+		return tx.Save(topUp).Error
+	})
+	return updated, err
 }
 
 // RechargeEpay 原子完成易支付订单：订单行锁、状态校验、成功更新与用户额度增加
@@ -237,6 +419,103 @@ func RechargeEpay(tradeNo string, actualPaymentMethod string, callerIp string, p
 
 	common.SysLog(fmt.Sprintf("易支付充值成功 trade_no=%s user_id=%d quota_to_add=%d money=%.2f", topUp.TradeNo, topUp.UserId, quotaToAdd, topUp.Money))
 	RecordTopupLog(topUp.UserId, fmt.Sprintf("使用在线充值成功，充值金额: %v，支付金额：%f", logger.LogQuota(quotaToAdd), topUp.Money), callerIp, topUp.PaymentMethod, PaymentProviderEpay)
+	return false, nil
+}
+
+var (
+	// ErrLianlianAmountMismatch 表示连连回调金额与订单金额不一致，拒绝入账。
+	ErrLianlianAmountMismatch = errors.New("lianlian payment amount mismatch")
+	// ErrLianlianProviderTradeNoInvalid 表示连连成功结果缺少合法的上游流水号。
+	ErrLianlianProviderTradeNoInvalid = errors.New("lianlian provider trade number invalid")
+	// ErrLianlianProviderTradeNoMismatch 表示同一商户订单对应了不同的上游流水号。
+	ErrLianlianProviderTradeNoMismatch = errors.New("lianlian provider trade number mismatch")
+)
+
+// RechargeLianlian atomically completes a Lianlian order. CNY_CENT amounts use
+// the current USD exchange rate at settlement time.
+func RechargeLianlian(tradeNo string, actualPaymentMethod string, callerIp string, paidAmount string, providerTradeNo string) (alreadyDone bool, err error) {
+	if tradeNo == "" {
+		return false, errors.New("未提供支付单号")
+	}
+
+	refCol := "`trade_no`"
+	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+		refCol = `"trade_no"`
+	}
+
+	var quotaToAdd int
+	topUp := &TopUp{}
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockForUpdate(tx).Where(refCol+" = ?", tradeNo).First(topUp).Error; err != nil {
+			return ErrTopUpNotFound
+		}
+		if topUp.PaymentProvider != PaymentProviderLianlian {
+			return ErrPaymentMethodMismatch
+		}
+		expectedMoneyCents := decimal.NewFromFloat(topUp.Money)
+		paidCNY, amountErr := decimal.NewFromString(paidAmount)
+		paidMoneyCents := paidCNY.Mul(decimal.NewFromInt(amountMinorUnitScale))
+		if amountErr != nil ||
+			!expectedMoneyCents.IsPositive() ||
+			!expectedMoneyCents.IsInteger() ||
+			!paidMoneyCents.IsInteger() ||
+			!paidMoneyCents.Equal(expectedMoneyCents) {
+			return ErrLianlianAmountMismatch
+		}
+
+		providerTradeNo = strings.TrimSpace(providerTradeNo)
+		if providerTradeNo == "" || len(providerTradeNo) > 128 {
+			return ErrLianlianProviderTradeNoInvalid
+		}
+		if topUp.ProviderTradeNo != "" && topUp.ProviderTradeNo != providerTradeNo {
+			return ErrLianlianProviderTradeNoMismatch
+		}
+		topUp.ProviderTradeNo = providerTradeNo
+		if topUp.Status == common.TopUpStatusSuccess {
+			if err := tx.Model(topUp).Update("provider_trade_no", providerTradeNo).Error; err != nil {
+				return err
+			}
+			alreadyDone = true
+			return nil
+		}
+		switch topUp.Status {
+		case common.TopUpStatusCreateUnknown, common.TopUpStatusPending, common.TopUpStatusFailed, common.TopUpStatusExpired, common.TopUpStatusCancelled:
+		default:
+			return ErrTopUpStatusInvalid
+		}
+		if actualPaymentMethod != "" && topUp.PaymentMethod != actualPaymentMethod {
+			return ErrPaymentMethodMismatch
+		}
+		var quotaErr error
+		quotaToAdd, quotaErr = topUp.Quota()
+		if quotaErr != nil || quotaToAdd <= 0 {
+			return ErrInvalidTopUpQuota
+		}
+		topUp.CompleteTime = common.GetTimestamp()
+		topUp.Status = common.TopUpStatusSuccess
+		if err := tx.Save(topUp).Error; err != nil {
+			return err
+		}
+		return creditTopUpQuota(tx, topUp.UserId, quotaToAdd, nil)
+	})
+	if err != nil {
+		if !errors.Is(err, ErrTopUpNotFound) &&
+			!errors.Is(err, ErrPaymentMethodMismatch) &&
+			!errors.Is(err, ErrTopUpStatusInvalid) &&
+			!errors.Is(err, ErrLianlianAmountMismatch) &&
+			!errors.Is(err, ErrLianlianProviderTradeNoInvalid) &&
+			!errors.Is(err, ErrLianlianProviderTradeNoMismatch) {
+			common.SysError("lianlian topup failed: " + err.Error())
+		}
+		return false, err
+	}
+	if alreadyDone {
+		return true, nil
+	}
+	syncCreditUserQuotaCache(topUp.UserId, quotaToAdd, "lianlian topup")
+
+	common.SysLog(fmt.Sprintf("连连充值成功 trade_no=%s user_id=%d quota_to_add=%d money_cents=%.0f", topUp.TradeNo, topUp.UserId, quotaToAdd, topUp.Money))
+	RecordTopupLog(topUp.UserId, fmt.Sprintf("使用连连支付充值成功，充值金额: %v，支付金额（分）：%.0f", logger.LogQuota(quotaToAdd), topUp.Money), callerIp, topUp.PaymentMethod, PaymentProviderLianlian)
 	return false, nil
 }
 
@@ -485,15 +764,20 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 			return errors.New("订单状态不是待支付，无法补单")
 		}
 
-		// 计算应充值额度：
-		// - Stripe 订单：Money 代表经分组倍率换算后的美元数量，直接 * QuotaPerUnit
-		// - 其他订单（如易支付）：Amount 为美元数量，* QuotaPerUnit
+		// Keep each provider's existing amount semantics; only Lianlian uses
+		// the explicit amount-unit conversion.
 		var quotaErr error
-		if topUp.PaymentProvider == PaymentProviderStripe {
+		switch topUp.PaymentProvider {
+		case PaymentProviderStripe:
 			quotaToAdd, quotaErr = common.WalletQuotaFromDecimalStrict(
 				decimal.NewFromFloat(topUp.Money).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
 			)
-		} else {
+		case PaymentProviderLianlian:
+			quotaToAdd, quotaErr = topUp.Quota()
+		case PaymentProviderCreem:
+			// Creem Amount already stores quota, matching its automatic settlement.
+			quotaToAdd, quotaErr = common.WalletQuotaFromDecimalStrict(decimal.NewFromInt(topUp.Amount))
+		default:
 			quotaToAdd, quotaErr = common.WalletQuotaFromDecimalStrict(
 				decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
 			)
@@ -515,7 +799,7 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 		}
 
 		userId = topUp.UserId
-		payMoney = topUp.Money
+		payMoney = topUp.PayableMoney()
 		paymentMethod = topUp.PaymentMethod
 		return nil
 	})
@@ -563,7 +847,6 @@ func RechargeCreem(referenceId string, customerEmail string, customerName string
 			return err
 		}
 
-		// Creem 直接使用 Amount 作为充值额度（整数）
 		quota, err = common.WalletQuotaFromDecimalStrict(decimal.NewFromInt(topUp.Amount))
 		if err != nil || quota <= 0 {
 			return ErrInvalidTopUpQuota

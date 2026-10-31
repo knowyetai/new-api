@@ -96,7 +96,9 @@ func GetTopUpInfo(c *gin.Context) {
 		}
 	}
 
+	enableLianlian := isLianlianTopUpEnabled()
 	data := gin.H{
+		"enable_lianlian_topup":            enableLianlian,
 		"enable_online_topup":              isEpayTopUpEnabled(),
 		"enable_stripe_topup":              isStripeTopUpEnabled(),
 		"enable_creem_topup":               isCreemTopUpEnabled(),
@@ -105,6 +107,14 @@ func GetTopUpInfo(c *gin.Context) {
 		"enable_redemption":                complianceConfirmed,
 		"payment_compliance_confirmed":     complianceConfirmed,
 		"payment_compliance_terms_version": operation_setting.CurrentComplianceTermsVersion,
+		"lianlian_pay_methods": func() any {
+			if enableLianlian {
+				return lianlianPayMethods()
+			}
+			return nil
+		}(),
+		"lianlian_min_topup":   lianlianMinAmountCents,
+		"lianlian_amount_unit": model.AmountUnitCNYCent,
 		"waffo_pay_methods": func() any {
 			if enableWaffo {
 				return setting.GetWaffoPayMethods()
@@ -133,6 +143,17 @@ type AmountRequest struct {
 	Amount int64 `json:"amount"`
 }
 
+func topUpResponses(topUps []*model.TopUp) []*model.TopUp {
+	responses := make([]*model.TopUp, 0, len(topUps))
+	for _, topUp := range topUps {
+		response := *topUp
+		response.AmountUnit = topUp.EffectiveAmountUnit()
+		response.Money = topUp.PayableMoney()
+		responses = append(responses, &response)
+	}
+	return responses
+}
+
 func GetEpayClient() *epay.Client {
 	if operation_setting.PayAddress == "" || operation_setting.EpayId == "" || operation_setting.EpayKey == "" {
 		return nil
@@ -155,7 +176,6 @@ func getPayMoney(amount int64, group string) float64 {
 		dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
 		dAmount = dAmount.Div(dQuotaPerUnit)
 	}
-
 	topupGroupRatio := common.GetTopupGroupRatio(group)
 	if topupGroupRatio == 0 {
 		topupGroupRatio = 1
@@ -547,7 +567,7 @@ func GetUserTopUps(c *gin.Context) {
 	}
 
 	pageInfo.SetTotal(int(total))
-	pageInfo.SetItems(topups)
+	pageInfo.SetItems(topUpResponses(topups))
 	common.ApiSuccess(c, pageInfo)
 }
 
@@ -572,7 +592,7 @@ func GetAllTopUps(c *gin.Context) {
 	}
 
 	pageInfo.SetTotal(int(total))
-	pageInfo.SetItems(topups)
+	pageInfo.SetItems(topUpResponses(topups))
 	common.ApiSuccess(c, pageInfo)
 }
 

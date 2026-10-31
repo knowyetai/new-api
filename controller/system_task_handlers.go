@@ -13,15 +13,16 @@ import (
 )
 
 // RegisterScheduledSystemTasks wires the periodic channel test, upstream model
-// update, and async task polling (Midjourney / Suno / video) jobs into the
-// system task framework so a DB lease dedups execution across multiple master
-// instances and each run is recorded as one task row. Call this before
-// service.StartSystemTaskRunner.
+// update, async task polling (Midjourney / Suno / video), and pending Lianlian
+// order reconciliation into the system task framework so a DB lease dedups
+// execution across multiple master instances and each run is recorded as one
+// task row. Call this before service.StartSystemTaskRunner.
 func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(channelTestHandler{})
 	service.RegisterSystemTaskHandler(modelUpdateHandler{})
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
+	service.RegisterSystemTaskHandler(lianlianReconcileHandler{})
 }
 
 // channelTestHandler runs the scheduled "test all channels" job. Enablement and
@@ -149,6 +150,39 @@ func (asyncTaskPollHandler) NewPayload() any { return nil }
 
 func (asyncTaskPollHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
 	summary := service.RunTaskPollingOnce(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+}
+
+// lianlianReconcileHandler queries pending scan-code orders when callbacks are
+// missing. It only settles orders whose upstream status is paid and reuses the
+// callback's idempotent transaction.
+type lianlianReconcileHandler struct{}
+
+func (lianlianReconcileHandler) Type() string { return model.SystemTaskTypeLianlianReconcile }
+
+func (lianlianReconcileHandler) Enabled() bool {
+	if !isLianlianQueryEnabled() {
+		return false
+	}
+	now := common.GetTimestamp()
+	hasPending, err := model.HasPendingTopUpsByProvider(
+		model.PaymentProviderLianlian,
+		now-int64(lianlianReconcileMinAge.Seconds()),
+		0,
+	)
+	return err == nil && hasPending
+}
+
+func (lianlianReconcileHandler) Interval() time.Duration { return time.Minute }
+
+func (lianlianReconcileHandler) NewPayload() any { return nil }
+
+func (lianlianReconcileHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	summary, err := ReconcileLianlianTopUpsOnce(ctx)
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
+		return
+	}
 	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }
 

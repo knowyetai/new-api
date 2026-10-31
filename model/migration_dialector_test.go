@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -54,6 +56,21 @@ type migrationDecimalV2 struct {
 type migrationDecimalV3 struct {
 	ID    int     `gorm:"primaryKey"`
 	Price float64 `gorm:"type:decimal(12,6);not null;default:1.25"`
+}
+
+type migrationTopUpV1 struct {
+	Id              int `gorm:"primaryKey"`
+	UserId          int `gorm:"index"`
+	Amount          int64
+	Money           float64
+	TradeNo         string `gorm:"unique;type:varchar(255);index"`
+	PaymentMethod   string `gorm:"type:varchar(50)"`
+	PaymentProvider string `gorm:"type:varchar(50);default:''"`
+	CreateTime      int64
+	CompleteTime    int64
+	Status          string
+	BillingUnitId   int `gorm:"index;default:0"`
+	OperatorUserId  int `gorm:"index;default:0"`
 }
 
 func TestMigrationSchemaStability(t *testing.T) {
@@ -139,6 +156,368 @@ func TestMigrationSchemaStability(t *testing.T) {
 				assert.Empty(t, recorder.schemaMutations())
 				require.NoError(t, db.Table(table).AutoMigrate(&migrationConstraintV1{}))
 				require.NoError(t, db.Table(table).Create(&migrationConstraintV1{Name: "existing"}).Error)
+			})
+
+			t.Run("topup_payment_tracking_columns", func(t *testing.T) {
+				const table = "migration_topup_test"
+				t.Cleanup(func() { _ = db.Migrator().DropTable(table) })
+				require.NoError(t, db.Table(table).AutoMigrate(&migrationTopUpV1{}))
+				require.NoError(t, db.Table(table).Create(&migrationTopUpV1{
+					Id:              1,
+					UserId:          7,
+					Amount:          10,
+					Money:           73.05,
+					TradeNo:         "legacy-topup",
+					PaymentMethod:   "alipay",
+					PaymentProvider: "epay",
+					Status:          common.TopUpStatusSuccess,
+				}).Error)
+
+				require.NoError(t, db.Table(table).AutoMigrate(&TopUp{}))
+				recorder.reset()
+				require.NoError(t, db.Table(table).AutoMigrate(&TopUp{}))
+				assert.Empty(t, recorder.schemaMutations())
+
+				assert.False(t, db.Table(table).Migrator().HasColumn(&TopUp{}, "money_cents"))
+				assert.True(t, db.Table(table).Migrator().HasColumn(&TopUp{}, "amount_unit"))
+				assert.True(t, db.Table(table).Migrator().HasColumn(&TopUp{}, "provider_trade_no"))
+				assert.True(t, db.Table(table).Migrator().HasColumn(&TopUp{}, "lianlian_request_id"))
+				assert.True(t, db.Table(table).Migrator().HasIndex(&TopUp{}, TopUpProviderStatusCreateTimeIndex))
+				assert.True(t, db.Table(table).Migrator().HasIndex(&TopUp{}, topUpUserLianlianRequestIDIndex))
+
+				var legacy TopUp
+				require.NoError(t, db.Table(table).First(&legacy, 1).Error)
+				assert.Empty(t, legacy.AmountUnit)
+				assert.Empty(t, legacy.ProviderTradeNo)
+				assert.InDelta(t, 73.05, legacy.Money, 1e-9)
+
+				requestID := "request-1"
+				tracked := TopUp{
+					Id:                2,
+					UserId:            7,
+					Amount:            10,
+					AmountUnit:        AmountUnitUSD,
+					Money:             73.05,
+					ProviderTradeNo:   "LL20261021001",
+					LianlianRequestID: &requestID,
+					TradeNo:           "tracked-topup",
+					PaymentMethod:     "alipay",
+					PaymentProvider:   "lianlian",
+					Status:            common.TopUpStatusPending,
+				}
+				require.NoError(t, db.Table(table).Create(&tracked).Error)
+				var saved TopUp
+				require.NoError(t, db.Table(table).Where("trade_no = ?", tracked.TradeNo).First(&saved).Error)
+				assert.Equal(t, AmountUnitUSD, saved.AmountUnit)
+				assert.Equal(t, tracked.ProviderTradeNo, saved.ProviderTradeNo)
+				require.NotNil(t, saved.LianlianRequestID)
+				assert.Equal(t, requestID, *saved.LianlianRequestID)
+
+				const freshTable = "migration_topup_fresh_test"
+				t.Cleanup(func() { _ = db.Migrator().DropTable(freshTable) })
+				require.NoError(t, db.Migrator().DropTable(table))
+				require.NoError(t, db.Table(freshTable).AutoMigrate(&TopUp{}))
+				recorder.reset()
+				require.NoError(t, db.Table(freshTable).AutoMigrate(&TopUp{}))
+				assert.Empty(t, recorder.schemaMutations())
+				assert.False(t, db.Table(freshTable).Migrator().HasColumn(&TopUp{}, "money_cents"))
+				assert.True(t, db.Table(freshTable).Migrator().HasIndex(&TopUp{}, TopUpProviderStatusCreateTimeIndex))
+				assert.True(t, db.Table(freshTable).Migrator().HasIndex(&TopUp{}, topUpUserLianlianRequestIDIndex))
+				require.NoError(t, db.Table(freshTable).Create(&tracked).Error)
+				var freshSaved TopUp
+				require.NoError(t, db.Table(freshTable).Where("trade_no = ?", tracked.TradeNo).First(&freshSaved).Error)
+				assert.Equal(t, tracked.Money, freshSaved.Money)
+				assert.Equal(t, tracked.AmountUnit, freshSaved.AmountUnit)
+				assert.Equal(t, tracked.ProviderTradeNo, freshSaved.ProviderTradeNo)
+				require.NotNil(t, freshSaved.LianlianRequestID)
+				assert.Equal(t, requestID, *freshSaved.LianlianRequestID)
+
+				const idempotencyTable = "migration_topup_idempotency_test"
+				t.Cleanup(func() { _ = db.Migrator().DropTable(idempotencyTable) })
+				require.NoError(t, db.Migrator().DropTable(freshTable))
+				require.NoError(t, db.Table(idempotencyTable).AutoMigrate(&TopUp{}))
+				idempotencyKey := "same-request"
+				require.NoError(t, db.Table(idempotencyTable).Create(&TopUp{
+					UserId:            7,
+					Amount:            10,
+					LianlianRequestID: &idempotencyKey,
+					TradeNo:           "idempotency-user-7",
+					PaymentProvider:   PaymentProviderLianlian,
+				}).Error)
+				assert.Error(t, db.Table(idempotencyTable).Create(&TopUp{
+					UserId:            7,
+					Amount:            20,
+					LianlianRequestID: &idempotencyKey,
+					TradeNo:           "idempotency-user-7-duplicate",
+					PaymentProvider:   PaymentProviderLianlian,
+				}).Error)
+				assert.NoError(t, db.Table(idempotencyTable).Create(&TopUp{
+					UserId:            8,
+					Amount:            10,
+					LianlianRequestID: &idempotencyKey,
+					TradeNo:           "idempotency-user-8",
+					PaymentProvider:   PaymentProviderLianlian,
+				}).Error)
+			})
+
+			t.Run("topup_reconciliation_statuses", func(t *testing.T) {
+				const table = "top_ups"
+				t.Cleanup(func() { _ = db.Migrator().DropTable(table) })
+				require.NoError(t, db.Table(table).AutoMigrate(&TopUp{}))
+				require.NoError(t, db.Table(table).Create([]TopUp{
+					{
+						Id:              1,
+						UserId:          7,
+						Amount:          100,
+						AmountUnit:      AmountUnitCNYCent,
+						Money:           100,
+						TradeNo:         "reconcile-pending",
+						PaymentProvider: PaymentProviderLianlian,
+						CreateTime:      100,
+						Status:          common.TopUpStatusPending,
+					},
+					{
+						Id:              2,
+						UserId:          7,
+						Amount:          100,
+						AmountUnit:      AmountUnitCNYCent,
+						Money:           100,
+						TradeNo:         "reconcile-cancelled",
+						PaymentProvider: PaymentProviderLianlian,
+						CreateTime:      200,
+						Status:          common.TopUpStatusCancelled,
+					},
+					{
+						Id:              3,
+						UserId:          7,
+						Amount:          100,
+						AmountUnit:      AmountUnitCNYCent,
+						Money:           100,
+						TradeNo:         "reconcile-expired",
+						PaymentProvider: PaymentProviderLianlian,
+						CreateTime:      300,
+						Status:          common.TopUpStatusExpired,
+					},
+					{
+						Id:              4,
+						UserId:          7,
+						Amount:          100,
+						AmountUnit:      AmountUnitCNYCent,
+						Money:           100,
+						TradeNo:         "reconcile-create-unknown",
+						PaymentProvider: PaymentProviderLianlian,
+						CreateTime:      250,
+						Status:          common.TopUpStatusCreateUnknown,
+					},
+				}).Error)
+
+				oldDB := DB
+				oldMainType, oldLogType := common.MainDatabaseType(), common.LogDatabaseType()
+				DB = db
+				databaseType := map[string]common.DatabaseType{
+					"sqlite":   common.DatabaseTypeSQLite,
+					"mysql":    common.DatabaseTypeMySQL,
+					"postgres": common.DatabaseTypePostgreSQL,
+				}[dialect]
+				common.SetDatabaseTypes(databaseType, oldLogType)
+				t.Cleanup(func() {
+					DB = oldDB
+					common.SetDatabaseTypes(oldMainType, oldLogType)
+				})
+
+				topUps, err := FindPendingTopUpsByProvider(PaymentProviderLianlian, 250, 0, 10)
+				require.NoError(t, err)
+				require.Len(t, topUps, 3)
+				assert.Equal(t, []string{"reconcile-pending", "reconcile-cancelled", "reconcile-create-unknown"}, []string{
+					topUps[0].TradeNo,
+					topUps[1].TradeNo,
+					topUps[2].TradeNo,
+				})
+
+				hasOpen, err := HasPendingTopUpsByProvider(PaymentProviderLianlian, 250, 0)
+				require.NoError(t, err)
+				assert.True(t, hasOpen)
+
+				require.NoError(t, UpdatePendingTopUpStatus(
+					"reconcile-pending",
+					PaymentProviderLianlian,
+					common.TopUpStatusCancelled,
+				))
+				updated, err := TransitionLianlianTopUpStatus(
+					"reconcile-pending",
+					common.TopUpStatusExpired,
+				)
+				require.NoError(t, err)
+				assert.True(t, updated)
+				var transitioned TopUp
+				require.NoError(t, db.Where("trade_no = ?", "reconcile-pending").First(&transitioned).Error)
+				assert.Equal(t, common.TopUpStatusExpired, transitioned.Status)
+			})
+
+			t.Run("lianlian_config_save_and_create", func(t *testing.T) {
+				require.NoError(t, db.AutoMigrate(&Option{}, &TopUp{}))
+				oldDB, oldOptions := DB, common.OptionMap
+				oldMainType, oldLogType := common.MainDatabaseType(), common.LogDatabaseType()
+				databaseType := map[string]common.DatabaseType{
+					"sqlite":   common.DatabaseTypeSQLite,
+					"mysql":    common.DatabaseTypeMySQL,
+					"postgres": common.DatabaseTypePostgreSQL,
+				}[dialect]
+				common.SetDatabaseTypes(databaseType, oldLogType)
+				oldEnabled, oldMerchant := setting.LianlianEnabled, setting.LianlianMchId
+				oldKey, oldBusiType := setting.LianlianPrivateKey, setting.LianlianBusiType
+				DB, common.OptionMap = db, map[string]string{}
+				t.Cleanup(func() {
+					DB, common.OptionMap = oldDB, oldOptions
+					common.SetDatabaseTypes(oldMainType, oldLogType)
+					setting.LianlianEnabled, setting.LianlianMchId = oldEnabled, oldMerchant
+					setting.LianlianPrivateKey, setting.LianlianBusiType = oldKey, oldBusiType
+					_ = db.Migrator().DropTable(&TopUp{}, &Option{})
+				})
+				values := map[string]string{
+					"LianlianEnabled":    "true",
+					"LianlianMchId":      "test-merchant",
+					"LianlianPrivateKey": "test-signing-key",
+					"LianlianBusiType":   "100001",
+				}
+				require.NoError(t, UpdateLianlianOptionsAtomic(values))
+				values["LianlianBusiType"] = "100002"
+				require.NoError(t, UpdateLianlianOptionsAtomic(values))
+				order := &TopUp{
+					UserId: 7, TradeNo: "config-save-and-create", Amount: 1,
+					AmountUnit: AmountUnitCNYCent, Money: 1,
+					PaymentProvider: PaymentProviderLianlian,
+					Status:          common.TopUpStatusCreateUnknown,
+				}
+				config, err := CreateLianlianTopUpWithConfigLock(order, nil)
+				require.NoError(t, err)
+				assert.Equal(t, "test-merchant", config.MerchantID)
+				assert.Equal(t, "100002", config.BusiType)
+				var saved TopUp
+				require.NoError(t, db.Where("trade_no = ?", order.TradeNo).First(&saved).Error)
+				assert.Equal(t, common.TopUpStatusCreateUnknown, saved.Status)
+				values["LianlianMchId"] = "different-merchant"
+				assert.ErrorIs(t, UpdateLianlianOptionsAtomic(values), ErrLianlianConfigOpenOrders)
+			})
+
+			t.Run("payment_settlement_amounts", func(t *testing.T) {
+				require.NoError(t, db.AutoMigrate(&User{}, &TopUp{}))
+				oldDB := DB
+				oldMainType, oldLogType := common.MainDatabaseType(), common.LogDatabaseType()
+				oldQuota, oldRate := common.QuotaPerUnit, operation_setting.USDExchangeRate
+				oldRedis := common.RedisEnabled
+				DB = db
+				common.SetMainDatabaseType(map[string]common.DatabaseType{
+					"sqlite":   common.DatabaseTypeSQLite,
+					"mysql":    common.DatabaseTypeMySQL,
+					"postgres": common.DatabaseTypePostgreSQL,
+				}[dialect])
+				initCol()
+				common.QuotaPerUnit, operation_setting.USDExchangeRate = 100, 7.3
+				common.RedisEnabled = false
+				t.Cleanup(func() {
+					DB = oldDB
+					common.SetDatabaseTypes(oldMainType, oldLogType)
+					initCol()
+					common.QuotaPerUnit, operation_setting.USDExchangeRate = oldQuota, oldRate
+					common.RedisEnabled = oldRedis
+					_ = db.Migrator().DropTable(&TopUp{}, &User{})
+				})
+				for _, tc := range []struct {
+					provider string
+					amount   int64
+					unit     AmountUnit
+					want     int
+				}{
+					{PaymentProviderEpay, 2, "", 200},
+					{PaymentProviderCreem, 730, "", 730},
+					{PaymentProviderWaffo, 2, "", 200},
+					{PaymentProviderWaffoPancake, 2, "", 200},
+					{PaymentProviderStripe, 2, "", 300},
+					{PaymentProviderLianlian, 730, AmountUnitCNYCent, 100},
+				} {
+					for _, manual := range []bool{false, true} {
+						if tc.provider == PaymentProviderStripe && !manual {
+							continue // Stripe automatic settlement is unchanged.
+						}
+						name := tc.provider + "-automatic"
+						if manual {
+							name = tc.provider + "-manual"
+						}
+						t.Run(name, func(t *testing.T) {
+							user := User{Username: name, AffCode: name, Quota: 10}
+							require.NoError(t, db.Create(&user).Error)
+							order := TopUp{UserId: user.Id, TradeNo: name, Amount: tc.amount,
+								AmountUnit: tc.unit, Money: 3, PaymentMethod: "alipay",
+								PaymentProvider: tc.provider, Status: common.TopUpStatusPending}
+							if tc.provider == PaymentProviderLianlian {
+								order.Money = 730
+							}
+							require.NoError(t, db.Create(&order).Error)
+							var err error
+							if manual {
+								err = ManualCompleteTopUp(name, "test")
+							} else {
+								switch tc.provider {
+								case PaymentProviderEpay:
+									_, err = RechargeEpay(name, "alipay", "test")
+								case PaymentProviderCreem:
+									err = RechargeCreem(name, "", "", "test")
+								case PaymentProviderWaffo:
+									err = RechargeWaffo(name, "test")
+								case PaymentProviderWaffoPancake:
+									err = RechargeWaffoPancake(name)
+								case PaymentProviderLianlian:
+									_, err = RechargeLianlian(name, "alipay", "test", "7.30", "LL-"+name)
+								}
+							}
+							require.NoError(t, err)
+							assert.Equal(t, 10+tc.want, getUserQuotaForPaymentGuardTest(t, user.Id))
+							assert.Equal(t, common.TopUpStatusSuccess, getTopUpStatusForPaymentGuardTest(t, name))
+						})
+					}
+				}
+			})
+
+			t.Run("lianlian_config_callback_window", func(t *testing.T) {
+				const table = "top_ups"
+				t.Cleanup(func() { _ = db.Migrator().DropTable(table) })
+				require.NoError(t, db.Table(table).AutoMigrate(&TopUp{}))
+
+				now := common.GetTimestamp()
+				require.NoError(t, db.Table(table).Create([]TopUp{
+					{
+						Id:              1,
+						UserId:          7,
+						Amount:          100,
+						AmountUnit:      AmountUnitCNYCent,
+						Money:           100,
+						TradeNo:         "config-lock-recent-expired",
+						PaymentProvider: PaymentProviderLianlian,
+						CreateTime:      now - lianlianCallbackConfigLockSeconds + 60,
+						Status:          common.TopUpStatusExpired,
+					},
+					{
+						Id:              2,
+						UserId:          7,
+						Amount:          100,
+						AmountUnit:      AmountUnitCNYCent,
+						Money:           100,
+						TradeNo:         "config-lock-old-expired",
+						PaymentProvider: PaymentProviderLianlian,
+						CreateTime:      now - lianlianCallbackConfigLockSeconds - 60,
+						Status:          common.TopUpStatusExpired,
+					},
+				}).Error)
+
+				locked, err := hasLianlianOrdersLockingConfig(db)
+				require.NoError(t, err)
+				assert.True(t, locked)
+
+				require.NoError(t, db.Table(table).Where("id = ?", 1).Delete(&TopUp{}).Error)
+				locked, err = hasLianlianOrdersLockingConfig(db)
+				require.NoError(t, err)
+				assert.False(t, locked)
 			})
 
 			if dialect == "mysql" {

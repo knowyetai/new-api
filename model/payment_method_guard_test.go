@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -86,6 +87,53 @@ func getUserQuotaForPaymentGuardTest(t *testing.T, userID int) int {
 	var user User
 	require.NoError(t, DB.Select("quota").Where("id = ?", userID).First(&user).Error)
 	return user.Quota
+}
+
+func TestTopUpQuotaRespectsAmountUnitAndLegacySemantics(t *testing.T) {
+	oldQuotaPerUnit := common.QuotaPerUnit
+	oldExchangeRate := operation_setting.USDExchangeRate
+	common.QuotaPerUnit = 100
+	operation_setting.USDExchangeRate = 7.3
+	t.Cleanup(func() {
+		common.QuotaPerUnit = oldQuotaPerUnit
+		operation_setting.USDExchangeRate = oldExchangeRate
+	})
+
+	testCases := []struct {
+		name     string
+		topUp    TopUp
+		expected int
+	}{
+		{name: "usd", topUp: TopUp{Amount: 2, AmountUnit: AmountUnitUSD}, expected: 200},
+		{name: "usd cent", topUp: TopUp{Amount: 200, AmountUnit: AmountUnitUSDCent}, expected: 200},
+		{name: "cny cent", topUp: TopUp{Amount: 730, AmountUnit: AmountUnitCNYCent}, expected: 100},
+		{name: "quota", topUp: TopUp{Amount: 2, AmountUnit: AmountUnitQuota}, expected: 2},
+		{name: "legacy creem", topUp: TopUp{Amount: 2, PaymentProvider: PaymentProviderCreem}, expected: 2},
+		{name: "legacy epay", topUp: TopUp{Amount: 2, PaymentProvider: PaymentProviderEpay}, expected: 200},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			quota, err := tc.topUp.Quota()
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, quota)
+		})
+	}
+
+	_, err := (&TopUp{Amount: 200, PaymentProvider: PaymentProviderLianlian}).Quota()
+	assert.ErrorIs(t, err, ErrInvalidAmountUnit)
+
+	operation_setting.USDExchangeRate = 0
+	_, err = (&TopUp{Amount: 1, AmountUnit: AmountUnitCNYCent}).Quota()
+	assert.ErrorIs(t, err, ErrInvalidAmountExchangeRate)
+}
+
+func TestTopUpPayableMoneyUsesPublicMoneyUnits(t *testing.T) {
+	lianlian := &TopUp{Money: 1050, PaymentProvider: PaymentProviderLianlian}
+	assert.InDelta(t, 10.5, lianlian.PayableMoney(), 1e-9)
+
+	legacy := &TopUp{Money: 10.5, PaymentProvider: PaymentProviderEpay}
+	assert.InDelta(t, 10.5, legacy.PayableMoney(), 1e-9)
 }
 
 func TestRechargeWaffoPancake_RejectsMismatchedPaymentMethod(t *testing.T) {

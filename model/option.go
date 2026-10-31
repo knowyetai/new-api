@@ -125,6 +125,14 @@ func InitOptionMap() {
 	common.OptionMap["WaffoPancakeMinTopUp"] = strconv.Itoa(setting.WaffoPancakeMinTopUp)
 	common.OptionMap["WaffoPancakeStoreID"] = setting.WaffoPancakeStoreID
 	common.OptionMap["WaffoPancakeProductID"] = setting.WaffoPancakeProductID
+	common.OptionMap["LianlianEnabled"] = strconv.FormatBool(setting.LianlianEnabled)
+	common.OptionMap["LianlianEnv"] = setting.LianlianEnv
+	common.OptionMap["LianlianGateway"] = setting.LianlianGateway
+	common.OptionMap["LianlianMchId"] = setting.LianlianMchId
+	common.OptionMap["LianlianPrivateKey"] = setting.LianlianPrivateKey
+	common.OptionMap["LianlianPlatformPublicCert"] = setting.LianlianPlatformPublicCert
+	common.OptionMap["LianlianBusiType"] = setting.LianlianBusiType
+	common.OptionMap["LianlianRiskCategory"] = setting.LianlianRiskCategory
 	common.OptionMap["TopupGroupRatio"] = common.TopupGroupRatio2JSONString()
 	common.OptionMap["Chats"] = setting.Chats2JsonString()
 	common.OptionMap["AutoGroups"] = setting.AutoGroups2JsonString()
@@ -277,6 +285,10 @@ func UpdateOptionsBulk(values map[string]string) error {
 	if err != nil {
 		return err
 	}
+	return applyOptionUpdates(values)
+}
+
+func applyOptionUpdates(values map[string]string) error {
 	for k, v := range values {
 		if err := updateOptionMap(k, v); err != nil {
 			return err
@@ -516,6 +528,22 @@ func updateOptionMap(key string, value string) (err error) {
 		setting.WaffoPancakeUnitPrice, _ = strconv.ParseFloat(value, 64)
 	case "WaffoPancakeMinTopUp":
 		setting.WaffoPancakeMinTopUp, _ = strconv.Atoi(value)
+	case "LianlianEnabled":
+		setting.LianlianEnabled = value == "true"
+	case "LianlianEnv":
+		setting.LianlianEnv = value
+	case "LianlianGateway":
+		setting.LianlianGateway = value
+	case "LianlianMchId":
+		setting.LianlianMchId = value
+	case "LianlianPrivateKey":
+		setting.LianlianPrivateKey = value
+	case "LianlianPlatformPublicCert":
+		setting.LianlianPlatformPublicCert = value
+	case "LianlianBusiType":
+		setting.LianlianBusiType = value
+	case "LianlianRiskCategory":
+		setting.LianlianRiskCategory = value
 	case "TopupGroupRatio":
 		err = common.UpdateTopupGroupRatioByJSONString(value)
 	case "GitHubClientId":
