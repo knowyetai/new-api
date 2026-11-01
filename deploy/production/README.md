@@ -2,13 +2,55 @@
 
 目标主机：8.145.51.132，目录 `/opt/knowyet-model-gateway`。独立 Compose 项目 `knowyet-model-gateway`，不修改 Casdoor 服务、数据库或端口。应用只绑定 127.0.0.1:3000，Redis 不发布宿主机端口；通过独立 Nginx 域名提供 HTTPS。
 
-当前准备使用 feature/billing-units 工作区的源码快照（包含未提交改动）。服务器 `source-manifest.json` 记录基线、分支及上传归档 SHA256。所有密钥在服务器生成，runtime.env 和 .env 为 0600，不入库。
+初次部署使用 feature/billing-units 工作区源码快照，历史 `source-manifest.json` 记录当时的基线、分支及归档 SHA256。当前部署流程以明确指定的 Git 提交为准，见下文。所有密钥在服务器生成，runtime.env 和 .env 为 0600，不入库。
 
 ## 部署条件
 
 - 公网 api.knowyet.com → 8.145.51.132；内网 api-inner.knowyet.com → 172.16.0.65。公网和内网证书均已签发；内网使用手工 DNS TXT 验证，目前不能自动续期。
 - 用户确认使用现有 RDS 中的独立数据库 zhicui_api，并复用 Casdoor 现有数据库账号凭证。连接信息在服务器内读取，不写入版本库；不操作 Casdoor 的表。
 - runtime.env 中 SQL_DSN 已指向 zhicui_api。SESSION_SECRET / CRYPTO_SECRET 应保持稳定，并纳入密钥备份。
+
+## 按提交部署（当前脚本）
+
+在本地仓库运行，提交必须已推送到 GitHub，且在本地可解析。必须明确传入提交 hash（支持 7～40 位），不接受分支名或标签：
+
+```bash
+bash deploy/production/deploy.sh 91c7c7059
+# 或指定目标：
+bash deploy/production/deploy.sh 91c7c7059 root@8.145.51.132 /opt/knowyet-model-gateway
+```
+
+服务器需事先存在源码仓库；若尚未准备，首次在服务器执行：
+
+```bash
+cd /opt/knowyet-model-gateway
+git clone git@github.com:knowyetai/new-api.git new-api
+```
+
+服务器自身必须有访问 GitHub 仓库的权限。origin 支持上述 SSH 地址或对应 HTTPS 地址。脚本不会配置凭据或修改 origin。
+
+执行流程：
+
+1. 本地将 hash 解析为完整提交 ID，仅通过 SSH 发送部署命令，不再打包或上传源码。
+2. 服务器取得现有部署锁，检查配置和 Redis。
+3. 检查 `/opt/knowyet-model-gateway/new-api` 为干净仓库；存在修改、未跟踪或忽略文件时停止，避免将非指定提交的内容带入镜像，不自动 reset/clean。
+4. 在该仓库执行 `git fetch --no-tags origin <完整 hash>` 和 detached HEAD 检出，核对实际提交。
+5. 回到部署根目录，以 `new-api` 为构建上下文，用原来的 `Dockerfile.cached` 和 `DOCKER_BUILDKIT=0 docker build --pull=false` 构建。
+6. 更新 NEW_API_IMAGE，仅重建 new-api，等待健康检查；成功后将完整 hash 写入部署根目录的 `.deployment-successful-commit`。失败直接退出，不自动回滚，也不阻止下一次人工部署。
+
+本地未提交修改不会部署，也不会阻止部署另一个明确指定的已推送提交。服务器源码目录会在后续部署时切换到新的提交，不再每次创建 build-source 目录；版本记录保存在 Git HEAD、镜像 revision 标签及上次成功提交文件中。失败不会覆盖上次成功提交。首次使用简化脚本前尚无成功记录时，请人工记录当前运行镜像的 revision 标签。
+
+部署失败后，由人查看日志，再用同一个脚本传入上次成功的 hash：
+
+```bash
+bash deploy/production/deploy.sh <上次成功的提交hash>
+```
+
+这会重新获取、检出和构建该版本，再启动容器，不需要单独的回滚脚本。已删除 `deploy_with_rollback.sh` 和 `rollback.sh`，不再生成回滚标签、部署 JSON、配置备份或切换状态标记。保留部署锁，避免两个人同时发布。旧流程留下的记录文件不参与新流程，也不会被自动删除。
+
+按旧 hash 部署只切换应用代码，不恢复数据库或 runtime.env 等运行配置；如果失败版本已执行不兼容的数据库迁移，需先人工处理兼容性，重新部署旧代码不能撤销迁移。
+
+Dockerfile、Compose 启动参数、数据库及 Redis 操作范围未改变；本次优化仅去掉本地到生产的全量源码包传输。已有历史源码目录和回滚镜像不会自动删除。
 
 ## 构建与运行
 
