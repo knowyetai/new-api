@@ -56,8 +56,10 @@ else:
 import json, os, sys
 a = sys.argv[1:]
 with open(os.environ["DEPLOY_TEST_EVENTS"], "a") as f:
-    f.write(json.dumps({"args": a, "cwd": os.getcwd()}) + "\\n")
-if a[0] == "compose":
+    f.write(json.dumps({"args": a, "cwd": os.getcwd(), "buildkit": os.getenv("DOCKER_BUILDKIT")}) + "\\n")
+if a[0] == "buildx" and os.getenv("FAIL_BUILDX"):
+    sys.exit(1)
+elif a[0] == "compose":
     if "--help" in a:
         print("--wait-timeout")
     elif "ps" in a and "-q" in a:
@@ -100,6 +102,10 @@ elif a[0] == "build" and os.getenv("FAIL_BUILD"):
         self.assertEqual((self.deploy / ".deployment-successful-commit").read_text().strip(), self.revision)
         build = next(c for c in self.commands() if c[0] == "build")
         self.assertEqual(build[-1], str(self.source))
+        event = next(json.loads(line) for line in self.events.read_text().splitlines()
+                     if json.loads(line)["args"][0] == "build")
+        self.assertEqual(event["buildkit"], "1")
+        self.assertIn("--progress=plain", build)
         self.assertIn(str(self.source / "deploy/production/Dockerfile.cached"), build)
         self.assertFalse((self.source / "SOURCE_COMMIT").exists())
 
@@ -136,6 +142,12 @@ elif a[0] == "build" and os.getenv("FAIL_BUILD"):
         self.assertEqual(self.run_deploy(revision=self.baseline), 0, self.output)
         self.assertEqual(self.git("-C", str(self.source), "rev-parse", "HEAD").strip(), self.baseline)
         self.assertIn("NEW_API_IMAGE=knowyet-new-api:" + self.baseline[:12], (self.deploy / ".env").read_text())
+
+    def test_missing_buildx_does_not_change_checkout_or_configuration(self):
+        self.assertNotEqual(self.run_deploy(FAIL_BUILDX="1"), 0)
+        self.assertEqual(self.git("-C", str(self.source), "rev-parse", "HEAD").strip(), self.baseline)
+        self.assertEqual((self.deploy / ".env").read_text(), "original\n")
+        self.assertFalse(any(c[0] == "build" for c in self.commands()))
 
     def test_branch_name_is_rejected_before_ssh(self):
         self.assertNotEqual(self.run_deploy(revision="main"), 0)

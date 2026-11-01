@@ -1,0 +1,36 @@
+# Production build inputs only. Update this list for new Go source directories
+# or embedded resources. This file overrides the root .dockerignore.
+**
+!*.go
+!go.mod
+!go.sum
+!VERSION
+!LICENSE
+!NOTICE
+!THIRD-PARTY-LICENSES.md
+!common/**
+!constant/**
+!controller/**
+!dto/**
+!i18n/**
+!logger/**
+!middleware/**
+!model/**
+!oauth/**
+!pkg/**
+!plugins/**
+!relay/**
+!relaykit/**
+!router/**
+!service/**
+!setting/**
+!types/**
+!web/**
+**/.git
+**/node_modules
+**/.cache
+**/.gocache
+**/.env
+**/.env.*
+web/dist
+web/coverage

@@ -40,11 +40,13 @@ export GIT_TERMINAL_PROMPT=0
 deploy_dir=$1
 image_tag=$2
 revision=$3
+SECONDS=0
 # 阶段 3：检查服务器依赖、部署锁、现有配置及 Redis 健康状态。
 cd "$deploy_dir"
 for command in docker python3 flock git; do
   command -v "$command" >/dev/null || { echo "Missing remote command: $command" >&2; exit 1; }
 done
+docker buildx version >/dev/null || { echo 'Docker Buildx is required for BuildKit builds' >&2; exit 1; }
 exec 9>"$deploy_dir/.deploy.lock"
 flock -n 9 || { echo 'Another deployment is running' >&2; exit 1; }
 [[ -f compose.yaml && -f .env && -f runtime.env && -f redis.conf ]] || {
@@ -106,9 +108,12 @@ fi
 # 提交号保存在 Git HEAD 和镜像标签，不写入源码目录。
 cd "$deploy_dir"
 echo "Building $image_tag"
-DOCKER_BUILDKIT=0 docker build --pull=false \
+build_started=$SECONDS
+DOCKER_BUILDKIT=1 docker build --progress=plain --pull=false \
   -f "$source_dir/deploy/production/Dockerfile.cached" -t "$image_tag" \
   --label "org.opencontainers.image.revision=$revision" "$source_dir"
+
+echo "Image build completed in $((SECONDS - build_started))s"
 
 # 阶段 6：生成候选 .env，仅更新 NEW_API_IMAGE，并校验 Compose 配置。
 # 校验通过才替换 .env；构建失败不会修改运行配置。
@@ -142,5 +147,5 @@ if ! "${compose[@]}" up -d --no-deps --wait --wait-timeout 180 new-api; then
 fi
 printf '%s\n' "$revision" > .deployment-successful-commit.tmp
 mv -f .deployment-successful-commit.tmp .deployment-successful-commit
-echo "Deployed $revision as $image_tag"
+echo "Deployed $revision as $image_tag in ${SECONDS}s (remote total)"
 REMOTE
