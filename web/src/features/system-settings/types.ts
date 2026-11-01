@@ -335,6 +335,7 @@ export type BillingSettings = {
   WaffoPancakeStoreID: string
   WaffoPancakeProductID: string
   LianlianEnabled: boolean
+  LianlianTeamTopUpEnabled: boolean
   LianlianEnv: string
   LianlianGateway: string
   LianlianMchId: string

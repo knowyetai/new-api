@@ -104,6 +104,7 @@ const defaultBillingSettings: BillingSettings = {
   WaffoPancakeStoreID: '',
   WaffoPancakeProductID: '',
   LianlianEnabled: false,
+  LianlianTeamTopUpEnabled: false,
   LianlianEnv: 'test',
   LianlianGateway: '',
   LianlianMchId: '',

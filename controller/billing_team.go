@@ -3,15 +3,19 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 func teamFeature(c *gin.Context, name string) bool {
@@ -300,7 +304,7 @@ func GetTeamTopups(c *gin.Context) {
 		return
 	}
 	page := common.GetPageQuery(c)
-	rows := []model.TopUp{}
+	rows := []*model.TopUp{}
 	var total int64
 	query := model.DB.Model(&model.TopUp{}).Where("billing_unit_id = ?", unit.Id)
 	if err := query.Count(&total).Error; err != nil {
@@ -311,7 +315,7 @@ func GetTeamTopups(c *gin.Context) {
 		teamFailure(c, err)
 		return
 	}
-	common.ApiSuccess(c, gin.H{"items": rows, "total": total})
+	common.ApiSuccess(c, gin.H{"items": topUpResponses(rows), "total": total})
 }
 
 func QuoteTeamEpay(c *gin.Context) {
@@ -324,4 +328,86 @@ func QuoteTeamEpay(c *gin.Context) {
 	}
 	c.Set("team_topup_payer_id", unit.PayerUserId)
 	RequestAmount(c)
+}
+
+// lianlianTeamTopUpTarget checks current team membership on every request.
+func lianlianTeamTopUpTarget(c *gin.Context) (lianlianTopUpTarget, bool) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		teamFailure(c, model.ErrTeamInvalid)
+		return lianlianTopUpTarget{}, false
+	}
+	var unit model.BillingUnit
+	if err := model.DB.First(&unit, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			teamFailure(c, model.ErrTeamUnavailable)
+		} else {
+			logger.LogError(c.Request.Context(), fmt.Sprintf("team top-up lookup failed unit_id=%d operator_user_id=%d error=%q", id, c.GetInt("id"), err.Error()))
+			teamFailure(c, err)
+		}
+		return lianlianTopUpTarget{}, false
+	}
+	operator := c.GetInt("id")
+	manager := c.GetInt("role") >= common.RoleAdminUser || unit.OwnerUserId == operator
+	if !manager {
+		var member model.BillingUnitMember
+		if err := model.DB.Where("billing_unit_id = ? AND user_id = ?", id, operator).First(&member).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				teamFailure(c, model.ErrTeamUnavailable)
+			} else {
+				logger.LogError(c.Request.Context(), fmt.Sprintf("team top-up membership lookup failed unit_id=%d operator_user_id=%d error=%q", id, operator, err.Error()))
+				teamFailure(c, err)
+			}
+			return lianlianTopUpTarget{}, false
+		}
+	}
+	return lianlianTopUpTarget{AccountUserID: unit.PayerUserId, OperatorID: operator, BillingUnitID: unit.Id, OwnOrdersOnly: !manager}, true
+}
+
+func requireLianlianTeamTopUp(c *gin.Context, target lianlianTopUpTarget) bool {
+	if target.OwnOrdersOnly && !setting.LianlianTeamTopUpEnabled {
+		c.JSON(http.StatusForbidden, gin.H{"success": false, "message": "TEAM_FEATURE_DISABLED", "code": "TEAM_FEATURE_DISABLED"})
+		return false
+	}
+	return requirePaymentCompliance(c)
+}
+
+func RequestTeamLianlianAmount(c *gin.Context) {
+	target, ok := lianlianTeamTopUpTarget(c)
+	if !ok || !requireLianlianTeamTopUp(c, target) {
+		return
+	}
+	requestLianlianAmount(c, target)
+}
+
+func RequestTeamLianlianPay(c *gin.Context) {
+	target, ok := lianlianTeamTopUpTarget(c)
+	if !ok || !requireLianlianTeamTopUp(c, target) {
+		return
+	}
+	requestLianlianPay(c, target)
+}
+
+func GetTeamLianlianOrder(c *gin.Context) {
+	target, ok := lianlianTeamTopUpTarget(c)
+	if !ok {
+		return
+	}
+	topUp, ok := getOwnedLianlianTopUp(c, target)
+	if !ok {
+		return
+	}
+	getLianlianOrder(c, topUp)
+}
+
+func CancelTeamLianlianOrder(c *gin.Context) {
+	target, ok := lianlianTeamTopUpTarget(c)
+	if !ok {
+		return
+	}
+	topUp, ok := getOwnedLianlianTopUp(c, target)
+	if !ok {
+		return
+	}
+	cancelLianlianOrder(c, topUp)
 }

@@ -29,6 +29,7 @@ var (
 // create-pay request. Reading it under the same lock as configuration writes
 // prevents an order from being created with a partially switched config.
 type LianlianPaymentConfig struct {
+	TeamTopUpEnabled  bool
 	Enabled           bool
 	Env               string
 	Gateway           string
@@ -62,6 +63,26 @@ func CreateLianlianTopUpWithConfigLock(
 		}
 		if !config.Enabled {
 			return ErrLianlianPaymentDisabled
+		}
+		// The member switch does not restrict owners or platform administrators.
+		// Resolve this privilege from stored identities, never from payment input.
+		if topUp.BillingUnitId > 0 && !config.TeamTopUpEnabled {
+			var unit BillingUnit
+			if err := tx.First(&unit, topUp.BillingUnitId).Error; err != nil {
+				return err
+			}
+			if unit.PayerUserId != topUp.UserId {
+				return ErrLianlianPaymentDisabled
+			}
+			if unit.OwnerUserId != topUp.OperatorUserId {
+				var operator User
+				if err := tx.Select("role").First(&operator, topUp.OperatorUserId).Error; err != nil {
+					return err
+				}
+				if operator.Role < common.RoleAdminUser {
+					return ErrLianlianPaymentDisabled
+				}
+			}
 		}
 		if strings.TrimSpace(config.MerchantID) == "" ||
 			strings.TrimSpace(config.PrivateKey) == "" {
@@ -182,6 +203,7 @@ func lockLianlianPaymentConfig(tx *gorm.DB) error {
 func loadLianlianPaymentConfig(tx *gorm.DB) (LianlianPaymentConfig, error) {
 	keys := []string{
 		"LianlianEnabled",
+		"LianlianTeamTopUpEnabled",
 		"LianlianEnv",
 		"LianlianGateway",
 		"LianlianMchId",
@@ -205,6 +227,7 @@ func lianlianPaymentConfigFromValues(values map[string]string) LianlianPaymentCo
 	enabled, _ := strconv.ParseBool(optionValueOr(values, "LianlianEnabled", strconv.FormatBool(setting.LianlianEnabled)))
 	return LianlianPaymentConfig{
 		Enabled:           enabled,
+		TeamTopUpEnabled:  optionValueOr(values, "LianlianTeamTopUpEnabled", strconv.FormatBool(setting.LianlianTeamTopUpEnabled)) == "true",
 		Env:               optionValueOr(values, "LianlianEnv", setting.LianlianEnv),
 		Gateway:           optionValueOr(values, "LianlianGateway", setting.LianlianGateway),
 		MerchantID:        optionValueOr(values, "LianlianMchId", setting.LianlianMchId),
@@ -218,6 +241,7 @@ func lianlianPaymentConfigFromValues(values map[string]string) LianlianPaymentCo
 func overlayLianlianPaymentConfig(current LianlianPaymentConfig, updates map[string]string) LianlianPaymentConfig {
 	values := map[string]string{
 		"LianlianEnabled":            strconv.FormatBool(current.Enabled),
+		"LianlianTeamTopUpEnabled":   strconv.FormatBool(current.TeamTopUpEnabled),
 		"LianlianEnv":                current.Env,
 		"LianlianGateway":            current.Gateway,
 		"LianlianMchId":              current.MerchantID,

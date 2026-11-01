@@ -185,6 +185,7 @@ const paymentSchema = z.object({
   WaffoPancakePrivateKey: z.string(),
   WaffoPancakeReturnURL: z.string(),
   LianlianEnabled: z.boolean(),
+  LianlianTeamTopUpEnabled: z.boolean(),
   LianlianEnv: z.string(),
   LianlianGateway: z.string().superRefine((value, ctx) => {
     if (!isValidLianlianGateway(value)) {
@@ -819,6 +820,7 @@ export function PaymentSettingsSection({
         initialRef.current = {
           ...initialRef.current,
           LianlianEnabled: values.LianlianEnabled,
+          LianlianTeamTopUpEnabled: values.LianlianTeamTopUpEnabled,
           LianlianEnv: lianlianRequest.env,
           LianlianGateway: lianlianRequest.gateway,
           LianlianMchId: lianlianRequest.merchant_id,
@@ -922,6 +924,7 @@ export function PaymentSettingsSection({
   }
   const lianlianValues: LianlianSettingsValues = {
     LianlianEnabled: currentFormValues.LianlianEnabled,
+    LianlianTeamTopUpEnabled: currentFormValues.LianlianTeamTopUpEnabled,
     LianlianEnv: currentFormValues.LianlianEnv,
     LianlianGateway: currentFormValues.LianlianGateway,
     LianlianMchId: currentFormValues.LianlianMchId,

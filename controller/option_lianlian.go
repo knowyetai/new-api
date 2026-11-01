@@ -15,6 +15,7 @@ import (
 )
 
 type saveLianlianSettingsRequest struct {
+	TeamTopUpEnabled  bool   `json:"team_topup_enabled"`
 	Enabled           bool   `json:"enabled"`
 	Env               string `json:"env"`
 	Gateway           string `json:"gateway"`
@@ -99,6 +100,7 @@ func SaveLianlianSettings(c *gin.Context) {
 
 	values := map[string]string{
 		"LianlianEnabled":            common.Interface2String(req.Enabled),
+		"LianlianTeamTopUpEnabled":   common.Interface2String(req.TeamTopUpEnabled),
 		"LianlianEnv":                env,
 		"LianlianGateway":            gateway,
 		"LianlianMchId":              merchantID,

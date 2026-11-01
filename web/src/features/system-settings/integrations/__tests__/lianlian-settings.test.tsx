@@ -33,6 +33,7 @@ import { LianlianSettingsSection } from '../lianlian-settings-section'
 
 const initialValues: LianlianSettingsValues = {
   LianlianEnabled: false,
+  LianlianTeamTopUpEnabled: false,
   LianlianEnv: 'test',
   LianlianGateway: '',
   LianlianMchId: 'merchant',
@@ -64,6 +65,32 @@ function SettingsFixture() {
 }
 
 describe('Lianlian settings', () => {
+  it('lets administrators configure member access independently of the provider switch', async () => {
+    render(<SettingsFixture />)
+    const user = userEvent.setup()
+    const toggle = screen.getByRole('switch', {
+      name: 'Allow ordinary team members to top up with LianLian',
+    })
+    expect(toggle).toHaveAccessibleDescription(
+      'When disabled, only team owners and platform administrators can create team top-ups. Personal top-ups and existing orders are unaffected.'
+    )
+    expect(toggle).not.toBeChecked()
+    toggle.focus()
+    await user.keyboard(' ')
+    expect(toggle).toBeChecked()
+    expect(
+      screen.getByRole('switch', { name: 'Enable LianLian' })
+    ).not.toBeChecked()
+    expect(
+      buildLianlianSettingsRequest(
+        { ...initialValues, LianlianTeamTopUpEnabled: true },
+        initialValues
+      )
+    ).toMatchObject({ enabled: false, team_topup_enabled: true })
+    await user.click(toggle)
+    expect(toggle).not.toBeChecked()
+  })
+
   it('updates the merchant ID and private key from accessible fields', async () => {
     render(<SettingsFixture />)
     const user = userEvent.setup()
@@ -121,6 +148,7 @@ describe('Lianlian settings', () => {
         {
           ...initialValues,
           LianlianEnabled: true,
+          LianlianTeamTopUpEnabled: true,
           LianlianEnv: 'prod',
           LianlianGateway: 'https://gateway.example/mch/',
           LianlianBusiType: '',
@@ -135,6 +163,7 @@ describe('Lianlian settings', () => {
       )
     ).toEqual({
       enabled: true,
+      team_topup_enabled: true,
       env: 'prod',
       gateway: 'https://gateway.example/mch',
       merchant_id: 'merchant',
@@ -155,6 +184,7 @@ describe('Lianlian settings', () => {
       )
     ).toEqual({
       enabled: false,
+      team_topup_enabled: false,
       env: 'test',
       gateway: '',
       merchant_id: 'merchant',
