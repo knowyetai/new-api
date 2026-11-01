@@ -337,6 +337,18 @@ func TestBillingTeamSelfService(t *testing.T) {
 			// Team payment is bound to its original wallet, and repeated callbacks credit exactly once.
 			topup := model.TopUp{UserId: team.PayerUserId, BillingUnitId: team.Id, OperatorUserId: owner, Amount: 1, Money: 1, TradeNo: "team-order", PaymentMethod: "alipay", PaymentProvider: model.PaymentProviderEpay, Status: common.TopUpStatusPending}
 			require.NoError(t, db.Create(&topup).Error)
+			operator, err := model.GetUserById(owner, false)
+			require.NoError(t, err)
+			responses := topUpResponses([]*model.TopUp{&topup, {UserId: owner}, {UserId: team.PayerUserId, BillingUnitId: team.Id}})
+			require.Len(t, responses, 3)
+			assert.Equal(t, owner, responses[0].OperatorUserId)
+			assert.Equal(t, operator.Username, responses[0].OperatorUsername)
+			assert.Equal(t, operator.DisplayName, responses[0].OperatorDisplayName)
+			assert.Equal(t, owner, responses[1].OperatorUserId)
+			assert.Equal(t, operator.Username, responses[1].OperatorUsername)
+			assert.Zero(t, responses[2].OperatorUserId)
+			assert.Empty(t, responses[2].OperatorUsername)
+
 			require.NoError(t, model.SelectOwnedBillingUnit(owner, second.Id, team.Id))
 			done, err := model.RechargeEpay(topup.TradeNo, "alipay", "")
 			require.NoError(t, err)
