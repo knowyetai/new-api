@@ -46,20 +46,34 @@ cd "$deploy_dir"
 for command in docker python3 flock git; do
   command -v "$command" >/dev/null || { echo "Missing remote command: $command" >&2; exit 1; }
 done
-docker buildx version >/dev/null || { echo 'Docker Buildx is required for BuildKit builds' >&2; exit 1; }
 exec 9>"$deploy_dir/.deploy.lock"
 flock -n 9 || { echo 'Another deployment is running' >&2; exit 1; }
 [[ -f compose.yaml && -f .env && -f runtime.env && -f redis.conf ]] || {
   echo 'Existing compose.yaml, .env, runtime.env and redis.conf are required' >&2
   exit 1
 }
+# An inherited shell variable must not override the image in the env file.
+unset NEW_API_IMAGE
+compose=(docker compose --env-file "$deploy_dir/.env" -f "$deploy_dir/compose.yaml")
+# 使用容器实际引用的镜像 ID，避免同名标签被重新指向其他镜像。
+# 状态读取失败、无容器或多个容器时，继续正常部署。
+current_id=$("${compose[@]}" ps -a -q new-api 2>/dev/null || true)
+if [[ -n $current_id && $current_id != *$'\n'* ]]; then
+  current_state=$(docker inspect --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.Image}}' "$current_id" 2>/dev/null || true)
+  read -r current_running current_health current_image <<< "$current_state"
+  if [[ $current_running == true && $current_health == healthy && -n $current_image ]]; then
+    current_revision=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$current_image" 2>/dev/null || true)
+    if [[ $current_revision == "$revision" ]]; then
+      echo "该版本已部署且运行正常：$revision"
+      exit 0
+    fi
+  fi
+fi
+docker buildx version >/dev/null || { echo 'Docker Buildx is required for BuildKit builds' >&2; exit 1; }
 docker compose up --help | grep -q -- '--wait-timeout' || {
   echo 'Docker Compose with --wait and --wait-timeout support is required' >&2
   exit 1
 }
-# An inherited shell variable must not override the image in the env file.
-unset NEW_API_IMAGE
-compose=(docker compose --env-file "$deploy_dir/.env" -f "$deploy_dir/compose.yaml")
 redis_id=$("${compose[@]}" ps -q redis)
 [[ -n $redis_id && $(docker inspect --format '{{.State.Health.Status}}' "$redis_id") == healthy ]] || {
   echo 'Redis must already be running and healthy; this script does not update Redis' >&2

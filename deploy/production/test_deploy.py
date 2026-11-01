@@ -63,12 +63,19 @@ elif a[0] == "compose":
     if "--help" in a:
         print("--wait-timeout")
     elif "ps" in a and "-q" in a:
-        print(a[-1])
+        if a[-1] == "redis" or os.getenv("CURRENT_REVISION"):
+            print(a[-1])
     elif "up" in a and os.getenv("FAIL_SWITCH"):
         sys.exit(1)
 elif a[0] == "inspect":
-    fmt = a[a.index("--format") + 1]
-    print("healthy")
+    if a[-1] == "redis":
+        print("healthy")
+    elif os.getenv("FAIL_INSPECT"):
+        sys.exit(1)
+    else:
+        print(os.getenv("CURRENT_RUNNING", "true"), os.getenv("CURRENT_HEALTH", "healthy"), "sha256:running-image")
+elif a[:2] == ["image", "inspect"]:
+    print(os.getenv("CURRENT_REVISION", ""))
 elif a[0] == "build" and os.getenv("FAIL_BUILD"):
     sys.exit(1)
 """)
@@ -93,6 +100,39 @@ elif a[0] == "build" and os.getenv("FAIL_BUILD"):
 
     def commands(self):
         return [json.loads(line)["args"] for line in self.events.read_text().splitlines()]
+
+    def test_healthy_requested_revision_skips_deployment(self):
+        # A historical record and the source checkout need not match the running image.
+        (self.deploy / ".deployment-successful-commit").write_text(self.baseline)
+        (self.source / "local-work.txt").write_text("keep me")
+        self.assertEqual(self.run_deploy(CURRENT_REVISION=self.revision, FAIL_BUILDX="1"), 0, self.output)
+        self.assertIn("该版本已部署且运行正常", self.output)
+        self.assertEqual(self.git("-C", str(self.source), "rev-parse", "HEAD").strip(), self.baseline)
+        self.assertEqual((self.deploy / ".env").read_text(), "original\n")
+        self.assertEqual((self.deploy / ".deployment-successful-commit").read_text(), self.baseline)
+        commands = self.commands()
+        self.assertFalse(any(c[0] == "build" or (c[0] == "compose" and "up" in c) for c in commands))
+        inspect = next(c for c in commands if c[:2] == ["image", "inspect"])
+        self.assertEqual(inspect[-1], "sha256:running-image")
+
+    def test_nonmatching_or_unhealthy_container_continues_deployment(self):
+        for overrides in (
+            {"CURRENT_REVISION": self.baseline},
+            {"CURRENT_REVISION": self.revision[:12]},
+            {"CURRENT_RUNNING": "false"},
+            {"CURRENT_HEALTH": "unhealthy"},
+            {"CURRENT_HEALTH": "starting"},
+            {"CURRENT_HEALTH": "none"},
+            {"FAIL_INSPECT": "1"},
+        ):
+            with self.subTest(overrides=overrides):
+                if self.events.exists():
+                    self.events.unlink()
+                env = dict(CURRENT_REVISION=self.revision, FAIL_BUILD="1")
+                env.update(overrides)
+                self.assertNotEqual(self.run_deploy(**env), 0)
+                self.assertTrue(any(c[0] == "build" for c in self.commands()))
+                self.assertNotIn("该版本已部署且运行正常", self.output)
 
     def test_requested_commit(self):
         (self.repo / "release.txt").write_text("uncommitted local change\n")

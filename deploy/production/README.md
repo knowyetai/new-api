@@ -32,7 +32,7 @@ git clone git@github.com:knowyetai/new-api.git new-api
 执行流程：
 
 1. 本地将 hash 解析为完整提交 ID，仅通过 SSH 发送部署命令，不再打包或上传源码。
-2. 服务器取得现有部署锁，检查配置和 Redis。
+2. 服务器取得现有部署锁，读取 new-api 容器实际镜像的完整 revision；若与目标 hash 一致，且容器运行中、健康状态为 healthy，则提示“该版本已部署且运行正常”并成功退出。否则继续检查构建依赖和 Redis，执行部署。此判断不依赖历史成功记录；提前退出时不会拉取源码、构建镜像或更新运行配置。
 3. 检查 `/opt/knowyet-model-gateway/new-api` 为干净仓库；存在修改、未跟踪或忽略文件时停止，避免将非指定提交的内容带入镜像，不自动 reset/clean。
 4. 在该仓库执行 `git fetch --no-tags origin <完整 hash>` 和 detached HEAD 检出，核对实际提交。
 5. 回到部署根目录，以 `new-api` 为构建上下文，用 `Dockerfile.cached` 和 `DOCKER_BUILDKIT=1 docker build --progress=plain --pull=false` 构建。服务器必须安装 Docker Buildx；构建日志显示每步耗时和缓存命中，脚本输出构建耗时与远端总耗时。
