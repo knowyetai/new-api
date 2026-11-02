@@ -10,7 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -21,7 +21,6 @@ import (
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
-	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -59,9 +58,13 @@ func newTestRSAKeyPEM(t *testing.T) (privateKeyPEM string, publicKeyPEM string) 
 
 func newLianlianTestEnv(t *testing.T, gatewayResponse string) *lianlianTestEnv {
 	t.Helper()
+	return newLianlianDatabaseTestEnv(t, gatewayResponse, "sqlite", "")
+}
+
+func newLianlianDatabaseTestEnv(t *testing.T, gatewayResponse, kind, dsn string) *lianlianTestEnv {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 	confirmPaymentComplianceForTest(t)
-	initModelListColumnNames(t)
 
 	oldDB, oldLogDB := model.DB, model.LOG_DB
 	oldMainType, oldLogType := common.MainDatabaseType(), common.LogDatabaseType()
@@ -74,15 +77,34 @@ func newLianlianTestEnv(t *testing.T, gatewayResponse string) *lianlianTestEnv {
 		common.QuotaPerUnit = oldQuotaPerUnit
 	})
 
-	dir := t.TempDir()
-	db, err := gorm.Open(sqlite.Open(filepath.Join(dir, "main.db")), &gorm.Config{})
+	db, fixtureDSN := newAuditTestDatabase(t, kind, dsn)
+	logDB, _ := newAuditTestDatabase(t, kind, dsn)
+	// Initialize dialect-dependent column names through the startup path.
+	originalSQLite, originalMaster := common.SQLitePath, common.IsMasterNode
+	common.IsMasterNode = false
+	if kind == "sqlite" {
+		common.SQLitePath = fixtureDSN
+		t.Setenv("SQL_DSN", "local")
+	} else {
+		t.Setenv("SQL_DSN", fixtureDSN)
+	}
+	t.Setenv("LOG_SQL_DSN", "")
+	require.NoError(t, model.InitDB())
+	initializedDB, err := model.DB.DB()
 	require.NoError(t, err)
-	logDB, err := gorm.Open(sqlite.Open(filepath.Join(dir, "log.db")), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.TopUp{}, &model.Option{}))
-	require.NoError(t, logDB.AutoMigrate(&model.Log{}))
+	require.NoError(t, initializedDB.Close())
+	common.SQLitePath, common.IsMasterNode = originalSQLite, originalMaster
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.TopUp{}, &model.Option{}, &model.BillingUnit{}, &model.BillingUnitMember{}))
+	require.NoError(t, logDB.AutoMigrate(&model.Log{}, &model.AuditLog{}))
 	model.DB, model.LOG_DB = db, logDB
-	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
+	common.SetDatabaseTypes(common.MainDatabaseType(), common.MainDatabaseType())
+	var version string
+	versionSQL := "SELECT VERSION()"
+	if kind == "sqlite" {
+		versionSQL = "SELECT sqlite_version()"
+	}
+	require.NoError(t, db.Raw(versionSQL).Scan(&version).Error)
+	t.Logf("database version: %s", version)
 	common.RedisEnabled = false
 	common.BatchUpdateEnabled = false
 	common.QuotaPerUnit = 500000
@@ -147,6 +169,8 @@ func newLianlianTestEnv(t *testing.T, gatewayResponse string) *lianlianTestEnv {
 	}))
 	t.Cleanup(env.gateway.Close)
 
+	oldTeamTopUp := setting.LianlianTeamTopUpEnabled
+	setting.LianlianTeamTopUpEnabled = false
 	oldLianlian := setting.LianlianEnabled
 	oldEnv := setting.LianlianEnv
 	oldGateway := setting.LianlianGateway
@@ -162,6 +186,7 @@ func newLianlianTestEnv(t *testing.T, gatewayResponse string) *lianlianTestEnv {
 	oldDisplayType := operation_setting.GetGeneralSetting().QuotaDisplayType
 	oldRatios := common.TopupGroupRatio2JSONString()
 	t.Cleanup(func() {
+		setting.LianlianTeamTopUpEnabled = oldTeamTopUp
 		setting.LianlianEnabled = oldLianlian
 		setting.LianlianEnv = oldEnv
 		setting.LianlianGateway = oldGateway
@@ -195,12 +220,22 @@ func newLianlianTestEnv(t *testing.T, gatewayResponse string) *lianlianTestEnv {
 	return env
 }
 
-func lianlianTestRouter(userId int) *gin.Engine {
+func lianlianTestRouter(userId int, roles ...int) *gin.Engine {
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
 		c.Set("id", userId)
+		role := common.RoleCommonUser
+		if len(roles) > 0 {
+			role = roles[0]
+		}
+		c.Set("role", role)
 	})
 	router.POST("/lianlian/pay", RequestLianlianPay)
+	router.POST("/billing-units/:id/lianlian/amount", RequestTeamLianlianAmount)
+	router.POST("/billing-units/:id/lianlian/pay", RequestTeamLianlianPay)
+	router.GET("/billing-units/:id/lianlian/order/:tradeNo", GetTeamLianlianOrder)
+	router.POST("/billing-units/:id/lianlian/order/:tradeNo/cancel", CancelTeamLianlianOrder)
+	router.GET("/billing-units/:id/topups", GetTeamTopups)
 	router.POST("/lianlian/amount", RequestLianlianAmount)
 	router.POST("/lianlian/notify", LianlianNotify)
 	router.GET("/lianlian/order/:tradeNo", GetLianlianOrder)
@@ -1775,4 +1810,365 @@ func TestReconcileLianlianTopUpsDoesNotStarveAfterFirstBatch(t *testing.T) {
 	order := model.GetTopUpByTradeNo(paidTradeNo)
 	require.NotNil(t, order)
 	assert.Equal(t, common.TopUpStatusSuccess, order.Status)
+}
+
+func TestLianlianTeamTopUp(t *testing.T) {
+	for _, kind := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(kind, func(t *testing.T) {
+			dsn := os.Getenv("TEST_" + strings.ToUpper(kind) + "_DSN")
+			if kind != "sqlite" && dsn == "" {
+				t.Skip("local database DSN required")
+			}
+			gatewayResponse := strings.Replace(lianlianTestCreatePayResponse, "LL20261016001", "LL2026101600PLAT", 1)
+			env := newLianlianDatabaseTestEnv(t, gatewayResponse, kind, dsn)
+			// Production settings are normalized by the settings save endpoint.
+			setting.LianlianPrivateKey = strings.TrimSpace(setting.LianlianPrivateKey)
+			setting.LianlianPlatformPublicCert = strings.TrimSpace(setting.LianlianPlatformPublicCert)
+			setting.LianlianTeamTopUpEnabled = true
+			t.Setenv("BILLING_TEAM_TOPUP_ENABLED", "false")
+			require.NoError(t, env.db.Create(&[]model.User{
+				{Id: 78, Username: "team_wallet", AffCode: "team-wallet", Group: "team", Status: common.UserStatusEnabled},
+				{Id: 79, Username: "other_wallet", AffCode: "other-wallet", Group: "team", Status: common.UserStatusEnabled},
+				{Id: 80, Username: "team_member", AffCode: "team-member", Status: common.UserStatusEnabled},
+				{Id: 81, Username: "administrator", AffCode: "administrator", Role: common.RoleAdminUser, Status: common.UserStatusEnabled},
+			}).Error)
+			require.NoError(t, env.db.Create(&[]model.BillingUnit{
+				{Id: 8, Name: "Team", OwnerUserId: 77, PayerUserId: 78},
+				{Id: 9, Name: "Other team", OwnerUserId: 77, PayerUserId: 79},
+			}).Error)
+			require.NoError(t, env.db.Create(&model.BillingUnitMember{UserId: 80, BillingUnitId: 8}).Error)
+			require.NoError(t, common.UpdateTopupGroupRatioByJSONString(`{"default":1,"team":0.8}`))
+			owner := lianlianTestRouter(77)
+			admin := lianlianTestRouter(81, common.RoleAdminUser)
+			member := lianlianTestRouter(80)
+			outsider := lianlianTestRouter(79)
+			const body = `{"amount_cents":730,"payment_method":"alipay","request_id":"shared-key","billing_unit_id":9,"user_id":80,"operator_user_id":80}`
+			const base = "/billing-units/8/lianlian"
+
+			quote := lianlianTestPost(t, owner, base+"/amount", body)
+			require.Contains(t, quote.Body.String(), `"amount_cents":584`)
+			personal := lianlianTestPost(t, owner, "/lianlian/pay", body)
+			require.Contains(t, personal.Body.String(), `"payable_amount_cents":730`)
+			created := lianlianTestPost(t, owner, base+"/pay", body)
+			require.Contains(t, created.Body.String(), `"payable_amount_cents":584`)
+			order, err := model.GetLianlianTopUpByRequestID(78, "shared-key")
+			require.NoError(t, err)
+			require.NotNil(t, order)
+			assert.Equal(t, 8, order.BillingUnitId)
+			assert.Equal(t, 77, order.OperatorUserId)
+			personalOrder, err := model.GetLianlianTopUpByRequestID(77, "shared-key")
+			require.NoError(t, err)
+			require.NotNil(t, personalOrder)
+			assert.Zero(t, personalOrder.BillingUnitId)
+			assert.NotEqual(t, personalOrder.TradeNo, order.TradeNo)
+			var upstream struct {
+				UserID   string `json:"user_id"`
+				RiskItem string `json:"risk_item"`
+			}
+			require.NoError(t, common.Unmarshal(env.lastBody, &upstream))
+			assert.Equal(t, "77", upstream.UserID)
+			assert.Contains(t, upstream.RiskItem, `"user_info_mercht_userlogin":"lianlian_topup_user"`)
+			assert.NotContains(t, upstream.RiskItem, "team_wallet")
+
+			// Retries from another authorized operator share the wallet's key,
+			// preserving the original operator and avoiding a second provider order.
+			memberQuote := lianlianTestPost(t, member, base+"/amount", body)
+			assert.Contains(t, memberQuote.Body.String(), `"amount_cents":584`)
+			memberReplay := lianlianTestPost(t, member, base+"/pay", body)
+			assert.Contains(t, memberReplay.Body.String(), "LIANLIAN_IDEMPOTENCY_CONFLICT")
+			assert.NotContains(t, memberReplay.Body.String(), order.TradeNo)
+			for _, method := range []string{http.MethodGet, http.MethodPost} {
+				path := base + "/order/" + order.TradeNo
+				if method == http.MethodPost {
+					path += "/cancel"
+				}
+				response := httptest.NewRecorder()
+				member.ServeHTTP(response, httptest.NewRequest(method, path, nil))
+				assert.Contains(t, response.Body.String(), "订单不存在")
+			}
+			requests := env.requests
+			for _, router := range []*gin.Engine{owner, admin} {
+				replay := lianlianTestPost(t, router, base+"/pay", body)
+				assert.Contains(t, replay.Body.String(), order.TradeNo)
+			}
+			conflict := lianlianTestPost(t, owner, base+"/pay", strings.Replace(body, "730", "731", 1))
+			assert.Contains(t, conflict.Body.String(), "LIANLIAN_IDEMPOTENCY_CONFLICT")
+			// Even an inconsistent historical row must not cross billing scopes.
+			require.NoError(t, env.db.Model(order).Update("billing_unit_id", 9).Error)
+			conflict = lianlianTestPost(t, owner, base+"/pay", body)
+			assert.Contains(t, conflict.Body.String(), "LIANLIAN_IDEMPOTENCY_CONFLICT")
+			require.NoError(t, env.db.Model(order).Update("billing_unit_id", 8).Error)
+			assert.Equal(t, requests, env.requests)
+
+			orderPath := base + "/order/" + order.TradeNo
+			for _, tc := range []struct{ method, path string }{
+				{http.MethodPost, base + "/amount"},
+				{http.MethodPost, base + "/pay"},
+				{http.MethodGet, orderPath},
+				{http.MethodPost, orderPath + "/cancel"},
+			} {
+				recorder := httptest.NewRecorder()
+				outsider.ServeHTTP(recorder, httptest.NewRequest(tc.method, tc.path, strings.NewReader(body)))
+				assert.Equal(t, http.StatusNotFound, recorder.Code, tc.path)
+			}
+			for _, path := range []string{
+				"/lianlian/order/" + order.TradeNo,
+				strings.Replace(orderPath, "/8/", "/9/", 1),
+				base + "/order/" + personalOrder.TradeNo,
+			} {
+				for _, method := range []string{http.MethodGet, http.MethodPost} {
+					requestPath := path
+					if method == http.MethodPost {
+						requestPath += "/cancel"
+					}
+					recorder := httptest.NewRecorder()
+					owner.ServeHTTP(recorder, httptest.NewRequest(method, requestPath, nil))
+					assert.Contains(t, recorder.Body.String(), "订单不存在")
+					assert.NotContains(t, recorder.Body.String(), "qr.alipay.com")
+				}
+			}
+			for _, amount := range []string{"0", "-1", "9223372036854775807"} {
+				for _, endpoint := range []string{"/amount", "/pay"} {
+					invalid := lianlianTestPost(t, owner, base+endpoint, `{"amount_cents":`+amount+`,"payment_method":"alipay","request_id":"invalid"}`)
+					assert.Contains(t, invalid.Body.String(), `"message":"error"`)
+				}
+			}
+			require.NoError(t, env.db.Model(&model.User{}).Where("id = ?", 78).Update("quota", common.MaxWalletQuota).Error)
+			for _, endpoint := range []string{"/amount", "/pay"} {
+				full := lianlianTestPost(t, owner, base+endpoint, strings.Replace(body, "shared-key", "full-wallet", 1))
+				assert.Contains(t, full.Body.String(), `"message":"error"`)
+			}
+			require.NoError(t, env.db.Model(&model.User{}).Where("id = ?", 78).Update("quota", 0).Error)
+			assert.Equal(t, requests, env.requests)
+
+			// Disabling member payments leaves manager access and existing orders intact.
+			setting.LianlianTeamTopUpEnabled = false
+			t.Setenv("BILLING_TEAM_TOPUP_ENABLED", "true")
+			for _, endpoint := range []string{"/amount", "/pay"} {
+				blocked := lianlianTestPost(t, member, base+endpoint, body)
+				assert.Equal(t, http.StatusForbidden, blocked.Code)
+			}
+			query := httptest.NewRecorder()
+			admin.ServeHTTP(query, httptest.NewRequest(http.MethodGet, orderPath, nil))
+			assert.Contains(t, query.Body.String(), `"can_pay":true`)
+			cancelled := lianlianTestPost(t, admin, orderPath+"/cancel", "")
+			require.Contains(t, cancelled.Body.String(), `"status":"cancelled"`)
+			require.NoError(t, env.db.Model(order).Update("create_time", time.Now().Add(-20*time.Minute).Unix()).Error)
+			query = httptest.NewRecorder()
+			owner.ServeHTTP(query, httptest.NewRequest(http.MethodGet, orderPath, nil))
+			assert.Contains(t, query.Body.String(), `"status":"expired"`)
+			assert.Contains(t, query.Body.String(), `"can_pay":false`)
+			notifyBody, signature := lianlianNotifyBody(t, env, order.TradeNo, "7.30")
+			assert.Equal(t, lianlianpay.FailResponse, postLianlianNotify(t, owner, notifyBody, signature).Body.String())
+			notifyBody, signature = lianlianNotifyBody(t, env, order.TradeNo, "5.84")
+			for range 2 {
+				assert.Equal(t, lianlianpay.SuccessResponse, postLianlianNotify(t, owner, notifyBody, signature).Body.String())
+			}
+			var payer, operator model.User
+			require.NoError(t, env.db.First(&payer, 78).Error)
+			require.NoError(t, env.db.First(&operator, 77).Error)
+			assert.Equal(t, 500000, payer.Quota)
+			assert.Equal(t, 1000, operator.Quota)
+
+			var audits []model.AuditLog
+			require.NoError(t, model.LOG_DB.Order("id").Find(&audits).Error)
+			require.Len(t, audits, 2)
+			assert.Equal(t, "billing_team.lianlian.create", audits[0].Action)
+			assert.Equal(t, 77, audits[0].UserId)
+			assert.Equal(t, "billing_team.lianlian.cancel", audits[1].Action)
+			assert.Equal(t, 81, audits[1].UserId)
+			for _, audit := range audits {
+				require.NotNil(t, audit.Other.Op)
+				encoded, err := common.Marshal(audit.Other.Op.Params)
+				require.NoError(t, err)
+				var params struct {
+					UnitID     int    `json:"unit_id"`
+					PayerID    int    `json:"payer_user_id"`
+					OperatorID int    `json:"operator_user_id"`
+					TradeNo    string `json:"trade_no"`
+				}
+				require.NoError(t, common.Unmarshal(encoded, &params))
+				assert.Equal(t, 8, params.UnitID)
+				assert.Equal(t, 78, params.PayerID)
+				assert.Equal(t, audit.UserId, params.OperatorID)
+				assert.Equal(t, order.TradeNo, params.TradeNo)
+			}
+			var logs []model.Log
+			require.NoError(t, model.LOG_DB.Where("user_id = ? AND type = ?", 78, model.LogTypeTopup).Find(&logs).Error)
+			require.Len(t, logs, 1)
+			assert.Contains(t, logs[0].Content, "团队 ID: 8，操作人 ID: 77，入账账户 ID: 78")
+			assert.Contains(t, logs[0].Content, order.TradeNo)
+
+			require.NoError(t, env.db.Create(&model.TopUp{UserId: 78, BillingUnitId: 8, Amount: 3, Money: 3, TradeNo: "team-epay", PaymentProvider: model.PaymentProviderEpay}).Error)
+			history := httptest.NewRecorder()
+			owner.ServeHTTP(history, httptest.NewRequest(http.MethodGet, "/billing-units/8/topups", nil))
+			var listing struct {
+				Data struct {
+					Items []model.TopUp `json:"items"`
+					Total int           `json:"total"`
+				} `json:"data"`
+			}
+			require.NoError(t, common.Unmarshal(history.Body.Bytes(), &listing))
+			require.Equal(t, 2, listing.Data.Total)
+			require.Len(t, listing.Data.Items, 2)
+			assert.Equal(t, float64(3), listing.Data.Items[0].Money)
+			assert.Equal(t, 5.84, listing.Data.Items[1].Money)
+			assert.Equal(t, model.AmountUnitCNYCent, listing.Data.Items[1].AmountUnit)
+			assert.NotContains(t, history.Body.String(), "qr.alipay.com")
+			assert.Equal(t, float64(584), model.GetTopUpByTradeNo(order.TradeNo).Money)
+
+			// A separate pending team order is recovered without a callback.
+			setting.LianlianTeamTopUpEnabled = true
+			second := lianlianTestPost(t, admin, base+"/pay", strings.Replace(body, "shared-key", "reconcile-key", 1))
+			require.Contains(t, second.Body.String(), `"message":"success"`)
+			recovery, err := model.GetLianlianTopUpByRequestID(78, "reconcile-key")
+			require.NoError(t, err)
+			require.NotNil(t, recovery)
+			assert.Equal(t, 81, recovery.OperatorUserId)
+			require.NoError(t, env.db.Model(recovery).Update("create_time", time.Now().Add(-3*time.Minute).Unix()).Error)
+			query = httptest.NewRecorder()
+			owner.ServeHTTP(query, httptest.NewRequest(http.MethodGet, base+"/order/"+recovery.TradeNo, nil))
+			assert.Contains(t, query.Body.String(), `"status":"pending"`)
+			assert.Contains(t, query.Body.String(), `"can_pay":true`)
+			env.queryResponse = fmt.Sprintf(`{"ret_code":"0000","ret_msg":"成功","mch_id":%q,"pay_type":"ALIPAY_NATIVE","txn_seqno":%q,"platform_txno":"LL2026101600PLAT","order_amount":"5.84","txn_status":"SUCCESS","pay_method_infos":[{"pay_type":"ALIPAY_NATIVE","amount":"5.84"}]}`, setting.LianlianMchId, recovery.TradeNo)
+			setting.LianlianTeamTopUpEnabled = false
+			summary, err := ReconcileLianlianTopUpsOnce(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, 1, summary.Settled)
+			require.NoError(t, env.db.First(&payer, 78).Error)
+			assert.Equal(t, 1000000, payer.Quota)
+
+			// Saving the dedicated option allows members to pay even with Epay disabled.
+			t.Setenv("BILLING_TEAM_TOPUP_ENABLED", "false")
+			options := common.OptionMap
+			common.OptionMap = map[string]string{}
+			t.Cleanup(func() { common.OptionMap = options })
+			settingsBody, err := common.Marshal(saveLianlianSettingsRequest{
+				Enabled: true, TeamTopUpEnabled: true, Env: setting.LianlianEnv,
+				Gateway: setting.LianlianGateway, MerchantID: setting.LianlianMchId,
+				PlatformPublicKey: setting.LianlianPlatformPublicCert,
+				BusiType:          setting.LianlianBusiType, RiskCategory: setting.LianlianRiskCategory,
+			})
+			require.NoError(t, err)
+			saved := lianlianTestPost(t, admin, "/option/lianlian/save", string(settingsBody))
+			require.Contains(t, saved.Body.String(), `"success":true`)
+			require.True(t, setting.LianlianTeamTopUpEnabled)
+			var option model.Option
+			require.NoError(t, env.db.Where(map[string]any{"key": "LianlianTeamTopUpEnabled"}).First(&option).Error)
+			assert.Equal(t, "true", option.Value)
+			listingResponse := httptest.NewRecorder()
+			admin.ServeHTTP(listingResponse, httptest.NewRequest(http.MethodGet, "/option", nil))
+			assert.Contains(t, listingResponse.Body.String(), `"key":"LianlianTeamTopUpEnabled","value":"true"`)
+			memberCreated := lianlianTestPost(t, member, base+"/pay", strings.Replace(body, "shared-key", "member-key", 1))
+			require.Contains(t, memberCreated.Body.String(), `"message":"success"`)
+			memberOrder, err := model.GetLianlianTopUpByRequestID(78, "member-key")
+			require.NoError(t, err)
+			require.NotNil(t, memberOrder)
+			assert.Equal(t, 80, memberOrder.OperatorUserId)
+			memberPath := base + "/order/" + memberOrder.TradeNo
+			// Turning the option off leaves existing member orders recoverable.
+			saved = lianlianTestPost(t, admin, "/option/lianlian/save", strings.Replace(string(settingsBody), `"team_topup_enabled":true`, `"team_topup_enabled":false`, 1))
+			require.Contains(t, saved.Body.String(), `"success":true`)
+			require.False(t, setting.LianlianTeamTopUpEnabled)
+			cancelled = lianlianTestPost(t, member, memberPath+"/cancel", "")
+			assert.Contains(t, cancelled.Body.String(), `"status":"cancelled"`)
+			notifyBody, signature = lianlianNotifyBody(t, env, memberOrder.TradeNo, "5.84")
+			assert.Equal(t, lianlianpay.SuccessResponse, postLianlianNotify(t, member, notifyBody, signature).Body.String())
+			require.NoError(t, env.db.First(&payer, 78).Error)
+			assert.Equal(t, 1500000, payer.Quota)
+			var memberUser model.User
+			require.NoError(t, env.db.First(&memberUser, 80).Error)
+			assert.Zero(t, memberUser.Quota)
+			// A stale in-memory flag cannot bypass the persisted configuration lock.
+			setting.LianlianTeamTopUpEnabled = true
+			blocked := lianlianTestPost(t, member, base+"/pay", strings.Replace(body, "shared-key", "stale-config", 1))
+			assert.Contains(t, blocked.Body.String(), `"message":"error"`)
+			stale, err := model.GetLianlianTopUpByRequestID(78, "stale-config")
+			require.NoError(t, err)
+			assert.Nil(t, stale)
+			setting.LianlianTeamTopUpEnabled = false
+			personal = lianlianTestPost(t, owner, "/lianlian/pay", strings.Replace(body, "shared-key", "personal-after-disable", 1))
+			assert.Contains(t, personal.Body.String(), `"message":"success"`)
+			// Both manager roles can create fresh orders with the persisted member switch off.
+			for i, manager := range []*gin.Engine{owner, admin} {
+				managerBody := strings.Replace(body, "shared-key", fmt.Sprintf("manager-disabled-%d", i), 1)
+				quote := lianlianTestPost(t, manager, base+"/amount", managerBody)
+				assert.Contains(t, quote.Body.String(), `"amount_cents":584`)
+				created := lianlianTestPost(t, manager, base+"/pay", managerBody)
+				require.Contains(t, created.Body.String(), `"message":"success"`)
+			}
+			// The persisted provider-wide switch blocks personal and team orders for everyone.
+			require.NoError(t, model.UpdateLianlianOptionsAtomic(map[string]string{"LianlianEnabled": "false"}))
+			for _, actor := range []*gin.Engine{owner, admin, member} {
+				for _, path := range []string{"/lianlian/pay", base + "/pay"} {
+					response := lianlianTestPost(t, actor, path, strings.Replace(body, "shared-key", "provider-disabled", 1))
+					assert.NotContains(t, response.Body.String(), `"message":"success"`)
+				}
+			}
+			// A stale enabled cache cannot bypass the persisted provider-wide switch.
+			require.NoError(t, model.UpdateLianlianOptionsAtomic(map[string]string{"LianlianEnabled": "false"}))
+			setting.LianlianEnabled = true
+			for _, actor := range []*gin.Engine{owner, admin} {
+				for _, path := range []string{"/lianlian/pay", base + "/pay"} {
+					response := lianlianTestPost(t, actor, path, strings.Replace(body, "shared-key", "persisted-provider-disabled", 1))
+					assert.Contains(t, response.Body.String(), `"message":"error"`)
+				}
+			}
+			require.NoError(t, env.db.Delete(&model.BillingUnitMember{}, "user_id = ?", 80).Error)
+			query = httptest.NewRecorder()
+			member.ServeHTTP(query, httptest.NewRequest(http.MethodGet, memberPath, nil))
+			assert.Equal(t, http.StatusNotFound, query.Code)
+		})
+	}
+}
+
+func TestLianlianTeamTopUpLookupErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		createTeam bool
+		failTable  string
+		status     int
+		code       string
+	}{
+		{name: "missing team", status: http.StatusNotFound, code: "TEAM_UNAVAILABLE"},
+		{name: "missing membership", createTeam: true, status: http.StatusNotFound, code: "TEAM_UNAVAILABLE"},
+		{name: "team query failure", failTable: "billing_units", status: http.StatusServiceUnavailable, code: "TEAM_SERVICE_UNAVAILABLE"},
+		{name: "membership query failure", createTeam: true, failTable: "billing_unit_members", status: http.StatusServiceUnavailable, code: "TEAM_SERVICE_UNAVAILABLE"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newLianlianTestEnv(t, lianlianTestCreatePayResponse)
+			if tc.createTeam {
+				require.NoError(t, env.db.Create(&model.BillingUnit{Id: 8, OwnerUserId: 78, PayerUserId: 79}).Error)
+			}
+			if tc.failTable != "" {
+				require.NoError(t, env.db.Callback().Query().Before("gorm:query").Register("team_lookup_failure", func(tx *gorm.DB) {
+					if tx.Statement.Table == tc.failTable {
+						tx.AddError(fmt.Errorf("private database connection failure"))
+					}
+				}))
+			}
+			router := lianlianTestRouter(lianlianTestUserID)
+			for _, endpoint := range []struct{ method, path string }{
+				{http.MethodPost, "/billing-units/8/lianlian/amount"},
+				{http.MethodPost, "/billing-units/8/lianlian/pay"},
+				{http.MethodGet, "/billing-units/8/lianlian/order/test-order"},
+				{http.MethodPost, "/billing-units/8/lianlian/order/test-order/cancel"},
+			} {
+				response := httptest.NewRecorder()
+				router.ServeHTTP(response, httptest.NewRequest(endpoint.method, endpoint.path, nil))
+				assert.Equal(t, tc.status, response.Code, endpoint.path)
+				var body struct {
+					Success bool   `json:"success"`
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				}
+				require.NoError(t, common.Unmarshal(response.Body.Bytes(), &body))
+				assert.False(t, body.Success)
+				assert.Equal(t, tc.code, body.Code)
+				assert.Equal(t, tc.code, body.Message)
+				assert.NotContains(t, response.Body.String(), "private database")
+			}
+			assert.Zero(t, env.requests)
+		})
+	}
 }

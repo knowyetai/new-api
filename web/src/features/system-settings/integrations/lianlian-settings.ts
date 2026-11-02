@@ -23,6 +23,7 @@ export const DEFAULT_LIANLIAN_RISK_CATEGORY = '1002'
 
 export type LianlianSettingsValues = {
   LianlianEnabled: boolean
+  LianlianTeamTopUpEnabled: boolean
   LianlianEnv: string
   LianlianGateway: string
   LianlianMchId: string
@@ -35,6 +36,7 @@ export type LianlianSettingsValues = {
 }
 
 export type SaveLianlianSettingsRequest = {
+  team_topup_enabled: boolean
   enabled: boolean
   env: string
   gateway: string
@@ -72,6 +74,7 @@ export function buildLianlianSettingsRequest(
 ): SaveLianlianSettingsRequest | null {
   const normalized = {
     enabled: values.LianlianEnabled,
+    teamTopUpEnabled: values.LianlianTeamTopUpEnabled,
     env: values.LianlianEnv === 'prod' ? 'prod' : 'test',
     gateway: removeTrailingSlash(values.LianlianGateway),
     merchantID: values.LianlianMchId.trim(),
@@ -80,13 +83,13 @@ export function buildLianlianSettingsRequest(
       : values.LianlianPrivateKey.trim(),
     clearPrivateKey: values.LianlianClearPrivateKey,
     platformPublicKey: values.LianlianPlatformPublicCert.trim(),
-    busiType:
-      values.LianlianBusiType.trim() || DEFAULT_LIANLIAN_BUSI_TYPE,
+    busiType: values.LianlianBusiType.trim() || DEFAULT_LIANLIAN_BUSI_TYPE,
     riskCategory:
       values.LianlianRiskCategory.trim() || DEFAULT_LIANLIAN_RISK_CATEGORY,
   }
   const initial = {
     enabled: initialValues.LianlianEnabled,
+    teamTopUpEnabled: initialValues.LianlianTeamTopUpEnabled,
     env: initialValues.LianlianEnv === 'prod' ? 'prod' : 'test',
     gateway: removeTrailingSlash(initialValues.LianlianGateway),
     merchantID: initialValues.LianlianMchId.trim(),
@@ -100,6 +103,7 @@ export function buildLianlianSettingsRequest(
 
   const changed =
     normalized.enabled !== initial.enabled ||
+    normalized.teamTopUpEnabled !== initial.teamTopUpEnabled ||
     normalized.env !== initial.env ||
     normalized.gateway !== initial.gateway ||
     normalized.merchantID !== initial.merchantID ||
@@ -114,6 +118,7 @@ export function buildLianlianSettingsRequest(
 
   return {
     enabled: normalized.enabled,
+    team_topup_enabled: normalized.teamTopUpEnabled,
     env: normalized.env,
     gateway: normalized.gateway,
     merchant_id: normalized.merchantID,

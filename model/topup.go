@@ -515,7 +515,11 @@ func RechargeLianlian(tradeNo string, actualPaymentMethod string, callerIp strin
 	syncCreditUserQuotaCache(topUp.UserId, quotaToAdd, "lianlian topup")
 
 	common.SysLog(fmt.Sprintf("连连充值成功 trade_no=%s user_id=%d quota_to_add=%d money_cents=%.0f", topUp.TradeNo, topUp.UserId, quotaToAdd, topUp.Money))
-	RecordTopupLog(topUp.UserId, fmt.Sprintf("使用连连支付充值成功，充值金额: %v，支付金额（分）：%.0f", logger.LogQuota(quotaToAdd), topUp.Money), callerIp, topUp.PaymentMethod, PaymentProviderLianlian)
+	content := fmt.Sprintf("使用连连支付充值成功，充值金额: %v，支付金额（分）：%.0f", logger.LogQuota(quotaToAdd), topUp.Money)
+	if topUp.BillingUnitId > 0 {
+		content += fmt.Sprintf("，团队 ID: %d，操作人 ID: %d，入账账户 ID: %d，订单号: %s", topUp.BillingUnitId, topUp.OperatorUserId, topUp.UserId, topUp.TradeNo)
+	}
+	RecordTopupLog(topUp.UserId, content, callerIp, topUp.PaymentMethod, PaymentProviderLianlian)
 	return false, nil
 }
 

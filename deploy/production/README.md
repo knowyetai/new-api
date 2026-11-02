@@ -2,7 +2,7 @@
 
 目标主机：8.145.51.132，目录 `/opt/knowyet-model-gateway`。独立 Compose 项目 `knowyet-model-gateway`，不修改 Casdoor 服务、数据库或端口。应用只绑定 127.0.0.1:3000，Redis 不发布宿主机端口；通过独立 Nginx 域名提供 HTTPS。
 
-当前准备使用 feature/billing-units 工作区的源码快照（包含未提交改动）。服务器 `source-manifest.json` 记录基线、分支及上传归档 SHA256。所有密钥在服务器生成，runtime.env 和 .env 为 0600，不入库。
+初次部署使用 feature/billing-units 工作区源码快照，历史 `source-manifest.json` 记录当时的基线、分支及归档 SHA256。当前部署流程以明确指定的 Git 提交为准，见下文。所有密钥在服务器生成，runtime.env 和 .env 为 0600，不入库。
 
 ## 部署条件
 
@@ -10,13 +10,61 @@
 - 用户确认使用现有 RDS 中的独立数据库 zhicui_api，并复用 Casdoor 现有数据库账号凭证。连接信息在服务器内读取，不写入版本库；不操作 Casdoor 的表。
 - runtime.env 中 SQL_DSN 已指向 zhicui_api。SESSION_SECRET / CRYPTO_SECRET 应保持稳定，并纳入密钥备份。
 
-## 构建与运行
+## 按提交部署（当前脚本）
 
-优先原始 Dockerfile。主机 Docker Hub 不可达时，`Dockerfile.cached` 使用主机已有 node:20.20.1-alpine / golang:1.25.8-alpine / alpine 基础镜像，Bun 固定 1.4.0，依赖沿用锁文件；通过传统构建器避免远端镜像元数据查询。Go 版本匹配本地后端验证版本，不使用本地测试占位 HTML，实际构建完整 web/dist。
+在本地仓库运行，提交必须已推送到 GitHub，且在本地可解析。必须明确传入提交 hash（支持 7～40 位），不接受分支名或标签：
 
 ```bash
-# 在 /opt/knowyet-model-gateway/build-source 内执行。
-DOCKER_BUILDKIT=0 docker build --pull=false -f deploy/production/Dockerfile.cached \
+bash deploy/production/deploy.sh 91c7c7059
+# 或指定目标：
+bash deploy/production/deploy.sh 91c7c7059 root@8.145.51.132 /opt/knowyet-model-gateway
+```
+
+服务器需事先存在源码仓库；若尚未准备，首次在服务器执行：
+
+```bash
+cd /opt/knowyet-model-gateway
+git clone git@github.com:knowyetai/new-api.git new-api
+```
+
+服务器自身必须有访问 GitHub 仓库的权限。origin 支持上述 SSH 地址或对应 HTTPS 地址。脚本不会配置凭据或修改 origin。
+
+执行流程：
+
+1. 本地将 hash 解析为完整提交 ID，仅通过 SSH 发送部署命令，不再打包或上传源码。
+2. 服务器取得现有部署锁，读取 new-api 容器实际镜像的完整 revision；若与目标 hash 一致，且容器运行中、健康状态为 healthy，则提示“该版本已部署且运行正常”并成功退出。否则继续检查构建依赖和 Redis，执行部署。此判断不依赖历史成功记录；提前退出时不会拉取源码、构建镜像或更新运行配置。
+3. 检查 `/opt/knowyet-model-gateway/new-api` 为干净仓库；存在修改、未跟踪或忽略文件时停止，避免将非指定提交的内容带入镜像，不自动 reset/clean。
+4. 在该仓库执行 `git fetch --no-tags origin <完整 hash>` 和 detached HEAD 检出，核对实际提交。
+5. 回到部署根目录，以 `new-api` 为构建上下文，用 `Dockerfile.cached` 和 `DOCKER_BUILDKIT=1 docker build --progress=plain --pull=false` 构建。服务器必须安装 Docker Buildx；构建日志显示每步耗时和缓存命中，脚本输出构建耗时与远端总耗时。
+6. 更新 NEW_API_IMAGE，仅重建 new-api，等待健康检查；成功后将完整 hash 写入部署根目录的 `.deployment-successful-commit`。失败直接退出，不自动回滚，也不阻止下一次人工部署。
+
+本地未提交修改不会部署，也不会阻止部署另一个明确指定的已推送提交。服务器源码目录会在后续部署时切换到新的提交，不再每次创建 build-source 目录；版本记录保存在 Git HEAD、镜像 revision 标签及上次成功提交文件中。失败不会覆盖上次成功提交。首次使用简化脚本前尚无成功记录时，请人工记录当前运行镜像的 revision 标签。
+
+部署失败后，由人查看日志，再用同一个脚本传入上次成功的 hash：
+
+```bash
+bash deploy/production/deploy.sh <上次成功的提交hash>
+```
+
+这会重新获取、检出和构建该版本，再启动容器，不需要单独的回滚脚本。已删除 `deploy_with_rollback.sh` 和 `rollback.sh`，不再生成回滚标签、部署 JSON、配置备份或切换状态标记。保留部署锁，避免两个人同时发布。旧流程留下的记录文件不参与新流程，也不会被自动删除。
+
+按旧 hash 部署只切换应用代码，不恢复数据库或 runtime.env 等运行配置；如果失败版本已执行不兼容的数据库迁移，需先人工处理兼容性，重新部署旧代码不能撤销迁移。
+
+Compose 启动参数、数据库及 Redis 操作范围未改变。已有历史源码目录和回滚镜像不会自动删除。
+
+## 构建与运行
+
+生产部署使用 `Dockerfile.cached`，基础镜像为 node:20.20.1-alpine / golang:1.25.8-alpine / alpine，Bun 固定 1.4.0，依赖沿用锁文件。使用 Docker 默认 builder 的 BuildKit，以复用本机镜像和持久缓存；不创建独立 builder。`--pull=false` 不强制更新基础镜像，但缺失镜像仍需要联网获取。实际构建完整 web/dist。
+
+缓存配置在 Dockerfile 中：Bun 下载缓存 `/root/.bun/install/cache`，Go 模块缓存 `/go/pkg/mod`，Go 编译缓存 `/root/.cache/go-build`。Go 下载和编译共用模块缓存；缓存使用项目专属 ID 和 `sharing=locked`。保持 `GOMAXPROCS=2` 与 `go build -p 2`。缓存不进入最终运行镜像。首次切换 BuildKit 需建立新缓存，后续构建才能受益；缓存清理后会重新下载和编译，脚本不自动清理缓存。
+
+`Dockerfile.cached.dockerignore` 覆盖根目录的忽略规则，只包含生产构建输入，排除部署脚本、文档和本地产物。仅修改部署脚本不会使应用源码层失效。新增 Go 源码目录或嵌入资源时，需更新该文件的允许列表。现有 `go:embed` 的前端产物、翻译、Lua 和任务插件资源均保留。前端未变时可复用前端层；前端变化时仍需构建前端，并重新构建嵌入前端产物的 Go 程序。
+
+缓存会占用服务器磁盘，可用 `docker buildx du` 查看。首次完整构建成功后，再比较重复构建、仅改 Go 和仅改前端三种场景的耗时；不可用模拟部署测试代替真实构建验证。
+
+```bash
+# 在 /opt/knowyet-model-gateway/new-api 内执行。
+DOCKER_BUILDKIT=1 docker build --progress=plain --pull=false -f deploy/production/Dockerfile.cached \
   -t knowyet-new-api:billing-units-20260910 .
 # 配置好独立数据库以后，在部署根目录执行。
 docker compose config --quiet

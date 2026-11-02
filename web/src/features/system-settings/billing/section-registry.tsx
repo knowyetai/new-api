@@ -178,6 +178,7 @@ const BILLING_SECTIONS = [
         }}
         lianlianDefaultValues={{
           LianlianEnabled: settings.LianlianEnabled ?? false,
+          LianlianTeamTopUpEnabled: settings.LianlianTeamTopUpEnabled ?? false,
           LianlianEnv: settings.LianlianEnv ?? 'test',
           LianlianGateway: settings.LianlianGateway ?? '',
           LianlianMchId: settings.LianlianMchId ?? '',

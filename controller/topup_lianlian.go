@@ -54,6 +54,15 @@ type LianlianPayRequest struct {
 	RequestID string `json:"request_id"`
 }
 
+// lianlianTopUpTarget separates the credited wallet from the authenticated actor.
+// Team targets are resolved server-side, never from payment request fields.
+type lianlianTopUpTarget struct {
+	AccountUserID int
+	OperatorID    int
+	BillingUnitID int
+	OwnOrdersOnly bool
+}
+
 // lianlianHTTPClient 是调用连连下单接口的客户端，超时时间与连连建议一致。
 var lianlianHTTPClient = &http.Client{Timeout: lianlianpay.TimeoutSeconds * time.Second}
 
@@ -125,6 +134,10 @@ func resolveLianlianAmountCents(req LianlianPayRequest) (int64, error) {
 
 // RequestLianlianAmount 返回本次充值需要支付的金额，单位为 CNY_CENT。
 func RequestLianlianAmount(c *gin.Context) {
+	requestLianlianAmount(c, lianlianTopUpTarget{AccountUserID: c.GetInt("id"), OperatorID: c.GetInt("id")})
+}
+
+func requestLianlianAmount(c *gin.Context, target lianlianTopUpTarget) {
 	if !isLianlianTopUpEnabled() {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值服务未启用"})
 		return
@@ -149,7 +162,7 @@ func RequestLianlianAmount(c *gin.Context) {
 		return
 	}
 
-	id := c.GetInt("id")
+	id := target.AccountUserID
 	group, err := model.GetUserGroup(id, true)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "获取用户分组失败"})
@@ -174,6 +187,10 @@ func RequestLianlianAmount(c *gin.Context) {
 
 // RequestLianlianPay 创建本地订单并向连连下单，返回扫码串供前端渲染二维码。
 func RequestLianlianPay(c *gin.Context) {
+	requestLianlianPay(c, lianlianTopUpTarget{AccountUserID: c.GetInt("id"), OperatorID: c.GetInt("id")})
+}
+
+func requestLianlianPay(c *gin.Context, target lianlianTopUpTarget) {
 	if !isPaymentComplianceConfirmed() {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值服务未启用"})
 		return
@@ -215,18 +232,19 @@ func RequestLianlianPay(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值金额不能小于 0.01 元"})
 		return
 	}
-	id := c.GetInt("id")
+	id := target.AccountUserID
 	existing, err := model.GetLianlianTopUpByRequestID(id, req.RequestID)
 	if err != nil {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("连连 查询幂等订单失败 user_id=%d request_id=%s error=%q", id, req.RequestID, err.Error()))
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "创建订单失败"})
 		return
 	}
-	if replayLianlianOrder(c, existing, amountCents, req.PaymentMethod) {
+	if replayLianlianOrder(c, existing, target, amountCents, req.PaymentMethod) {
 		return
 	}
 
-	user, err := model.GetUserById(id, false)
+	// Provider identity and risk attributes describe the person initiating payment.
+	user, err := model.GetUserById(target.OperatorID, false)
 	if err != nil || user == nil {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "用户不存在"})
 		return
@@ -272,6 +290,11 @@ func RequestLianlianPay(c *gin.Context) {
 		Status:            common.TopUpStatusCreateUnknown,
 	}
 
+	if target.BillingUnitID > 0 {
+		topUp.BillingUnitId = target.BillingUnitID
+		topUp.OperatorUserId = target.OperatorID
+	}
+
 	var signed *lianlianpay.SignedRequest
 	config, err := model.CreateLianlianTopUpWithConfigLock(topUp, func(config model.LianlianPaymentConfig) error {
 		registeredAt := ""
@@ -285,7 +308,7 @@ func RequestLianlianPay(c *gin.Context) {
 			PrivateKey:   config.PrivateKey,
 			MerchantID:   config.MerchantID,
 			BusiType:     config.BusiType,
-			UserID:       strconv.Itoa(id),
+			UserID:       strconv.Itoa(target.OperatorID),
 			Username:     user.Username,
 			UserEmail:    user.Email,
 			Registered:   registeredAt,
@@ -305,7 +328,7 @@ func RequestLianlianPay(c *gin.Context) {
 	})
 	if err != nil {
 		existing, lookupErr := model.GetLianlianTopUpByRequestID(id, req.RequestID)
-		if lookupErr == nil && replayLianlianOrder(c, existing, amountCents, req.PaymentMethod) {
+		if lookupErr == nil && replayLianlianOrder(c, existing, target, amountCents, req.PaymentMethod) {
 			return
 		}
 		switch {
@@ -324,6 +347,15 @@ func RequestLianlianPay(c *gin.Context) {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("连连 创建充值订单失败 user_id=%d trade_no=%s amount_cents=%d error=%q", id, tradeNo, amountCents, err.Error()))
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "创建订单失败"})
 		return
+	}
+
+	if topUp.BillingUnitId > 0 {
+		teamAudit(c, "billing_team.lianlian.create", map[string]any{
+			"unit_id": topUp.BillingUnitId, "payer_user_id": topUp.UserId,
+			"operator_user_id": topUp.OperatorUserId, "trade_no": topUp.TradeNo,
+			"amount_cents": topUp.Amount, "payable_amount_cents": moneyCents,
+			"payment_method": topUp.PaymentMethod,
+		})
 	}
 
 	result, err := createLianlianPayment(
@@ -367,11 +399,14 @@ func RequestLianlianPay(c *gin.Context) {
 // replayLianlianOrder returns the original order for an idempotency key. A
 // reused key with different order parameters is rejected instead of silently
 // returning an order for another amount or payment method.
-func replayLianlianOrder(c *gin.Context, topUp *model.TopUp, amountCents int64, paymentMethod string) bool {
+func replayLianlianOrder(c *gin.Context, topUp *model.TopUp, target lianlianTopUpTarget, amountCents int64, paymentMethod string) bool {
 	if topUp == nil {
 		return false
 	}
 	if topUp.PaymentProvider != model.PaymentProviderLianlian ||
+		(target.OwnOrdersOnly && topUp.OperatorUserId != target.OperatorID) ||
+		topUp.UserId != target.AccountUserID ||
+		topUp.BillingUnitId != target.BillingUnitID ||
 		topUp.Amount != amountCents ||
 		topUp.EffectiveAmountUnit() != model.AmountUnitCNYCent ||
 		topUp.PaymentMethod != paymentMethod {
@@ -531,7 +566,7 @@ func markTopUpFailed(topUp *model.TopUp) {
 	}
 }
 
-func getOwnedLianlianTopUp(c *gin.Context) (*model.TopUp, bool) {
+func getOwnedLianlianTopUp(c *gin.Context, target lianlianTopUpTarget) (*model.TopUp, bool) {
 	tradeNo := c.Param("tradeNo")
 	if tradeNo == "" {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "参数错误"})
@@ -543,7 +578,8 @@ func getOwnedLianlianTopUp(c *gin.Context) (*model.TopUp, bool) {
 		return nil, false
 	}
 	userId := c.GetInt("id")
-	if topUp.UserId != userId {
+	if (target.OwnOrdersOnly && topUp.OperatorUserId != target.OperatorID) ||
+		topUp.UserId != target.AccountUserID || topUp.BillingUnitId != target.BillingUnitID {
 		// 不暴露他人订单的存在性细节，统一按订单不存在处理。
 		logger.LogWarn(c.Request.Context(), fmt.Sprintf("连连 订单查询越权拒绝 user_id=%d trade_no=%s client_ip=%s", userId, tradeNo, c.ClientIP()))
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "订单不存在"})
@@ -579,10 +615,14 @@ func expireLianlianTopUpIfNeeded(ctx context.Context, topUp *model.TopUp, now in
 
 // GetLianlianOrder 返回当前用户的订单状态，供前端在展示或刷新二维码前校验。
 func GetLianlianOrder(c *gin.Context) {
-	topUp, ok := getOwnedLianlianTopUp(c)
+	topUp, ok := getOwnedLianlianTopUp(c, lianlianTopUpTarget{AccountUserID: c.GetInt("id"), OperatorID: c.GetInt("id")})
 	if !ok {
 		return
 	}
+	getLianlianOrder(c, topUp)
+}
+
+func getLianlianOrder(c *gin.Context, topUp *model.TopUp) {
 	now := common.GetTimestamp()
 	topUp, _ = expireLianlianTopUpIfNeeded(c.Request.Context(), topUp, now)
 	canPay := topUp.Status == common.TopUpStatusPending &&
@@ -633,10 +673,14 @@ func GetLianlianOrder(c *gin.Context) {
 // CancelLianlianOrder abandons a recoverable order locally. A provider-confirmed
 // payment can still settle the order after cancellation.
 func CancelLianlianOrder(c *gin.Context) {
-	topUp, ok := getOwnedLianlianTopUp(c)
+	topUp, ok := getOwnedLianlianTopUp(c, lianlianTopUpTarget{AccountUserID: c.GetInt("id"), OperatorID: c.GetInt("id")})
 	if !ok {
 		return
 	}
+	cancelLianlianOrder(c, topUp)
+}
+
+func cancelLianlianOrder(c *gin.Context, topUp *model.TopUp) {
 	topUp, expired := expireLianlianTopUpIfNeeded(c.Request.Context(), topUp, common.GetTimestamp())
 	if expired || topUp.Status == common.TopUpStatusExpired {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "订单已过期，请重新创建订单"})
@@ -675,6 +719,12 @@ func CancelLianlianOrder(c *gin.Context) {
 		}
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "当前订单状态不可取消"})
 		return
+	}
+	if topUp.BillingUnitId > 0 {
+		teamAudit(c, "billing_team.lianlian.cancel", map[string]any{
+			"unit_id": topUp.BillingUnitId, "payer_user_id": topUp.UserId,
+			"operator_user_id": c.GetInt("id"), "trade_no": topUp.TradeNo,
+		})
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"message": "success",

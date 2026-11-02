@@ -125,6 +125,7 @@ func InitOptionMap() {
 	common.OptionMap["WaffoPancakeMinTopUp"] = strconv.Itoa(setting.WaffoPancakeMinTopUp)
 	common.OptionMap["WaffoPancakeStoreID"] = setting.WaffoPancakeStoreID
 	common.OptionMap["WaffoPancakeProductID"] = setting.WaffoPancakeProductID
+	common.OptionMap["LianlianTeamTopUpEnabled"] = strconv.FormatBool(setting.LianlianTeamTopUpEnabled)
 	common.OptionMap["LianlianEnabled"] = strconv.FormatBool(setting.LianlianEnabled)
 	common.OptionMap["LianlianEnv"] = setting.LianlianEnv
 	common.OptionMap["LianlianGateway"] = setting.LianlianGateway
@@ -528,6 +529,8 @@ func updateOptionMap(key string, value string) (err error) {
 		setting.WaffoPancakeUnitPrice, _ = strconv.ParseFloat(value, 64)
 	case "WaffoPancakeMinTopUp":
 		setting.WaffoPancakeMinTopUp, _ = strconv.Atoi(value)
+	case "LianlianTeamTopUpEnabled":
+		setting.LianlianTeamTopUpEnabled = value == "true"
 	case "LianlianEnabled":
 		setting.LianlianEnabled = value == "true"
 	case "LianlianEnv":

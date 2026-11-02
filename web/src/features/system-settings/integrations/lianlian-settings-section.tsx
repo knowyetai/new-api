@@ -16,8 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useTranslation } from 'react-i18next'
 import { useFormContext } from 'react-hook-form'
+import { useTranslation } from 'react-i18next'
 
 import { Checkbox } from '@/components/ui/checkbox'
 import {
@@ -43,6 +43,7 @@ import { Textarea } from '@/components/ui/textarea'
 
 import {
   SettingsSwitchContent,
+  SettingsSwitchField,
   SettingsSwitchItem,
 } from '../components/settings-form-layout'
 import {
@@ -116,6 +117,18 @@ export function LianlianSettingsSection(props: LianlianSettingsSectionProps) {
               </FormControl>
             </SettingsSwitchItem>
           </FormItem>
+        )}
+      />
+
+      <SettingsSwitchField
+        controlId='lianlian-team-topup'
+        checked={props.values.LianlianTeamTopUpEnabled}
+        onCheckedChange={(checked) =>
+          props.onValueChange('LianlianTeamTopUpEnabled', checked)
+        }
+        label={t('Allow ordinary team members to top up with LianLian')}
+        description={t(
+          'When disabled, only team owners and platform administrators can create team top-ups. Personal top-ups and existing orders are unaffected.'
         )}
       />
 

@@ -7,6 +7,9 @@ import "github.com/QuantumNous/new-api/service/lianlianpay"
 var (
 	// LianlianEnabled 是连连支付的启用开关。
 	LianlianEnabled bool
+	// LianlianTeamTopUpEnabled allows ordinary members to fund their team.
+	// Owners and platform administrators do not require this switch.
+	LianlianTeamTopUpEnabled bool
 	// LianlianEnv 取值 test/prod，决定默认网关。
 	LianlianEnv = lianlianpay.EnvTest
 	// LianlianGateway 为空时使用官方网关，可填自建代理或自选网关。

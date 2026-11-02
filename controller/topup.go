@@ -143,13 +143,40 @@ type AmountRequest struct {
 	Amount int64 `json:"amount"`
 }
 
-func topUpResponses(topUps []*model.TopUp) []*model.TopUp {
-	responses := make([]*model.TopUp, 0, len(topUps))
+type topUpResponse struct {
+	model.TopUp
+	OperatorUsername    string `json:"operator_username"`
+	OperatorDisplayName string `json:"operator_display_name"`
+}
+
+func topUpResponses(topUps []*model.TopUp) []*topUpResponse {
+	responses := make([]*topUpResponse, 0, len(topUps))
+	operators := make(map[int]*model.User)
 	for _, topUp := range topUps {
 		response := *topUp
 		response.AmountUnit = topUp.EffectiveAmountUnit()
 		response.Money = topUp.PayableMoney()
-		responses = append(responses, &response)
+		// Personal legacy orders use UserId; team UserId is the wallet, not the operator.
+		if response.OperatorUserId == 0 && response.BillingUnitId == 0 {
+			response.OperatorUserId = response.UserId
+		}
+		item := &topUpResponse{TopUp: response}
+		if id := response.OperatorUserId; id > 0 {
+			operator, loaded := operators[id]
+			if !loaded {
+				var err error
+				operator, err = model.GetUserById(id, false)
+				if err != nil {
+					operator = nil
+				}
+				operators[id] = operator
+			}
+			if operator != nil {
+				item.OperatorUsername = operator.Username
+				item.OperatorDisplayName = operator.DisplayName
+			}
+		}
+		responses = append(responses, item)
 	}
 	return responses
 }
