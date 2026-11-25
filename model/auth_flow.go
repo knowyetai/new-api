@@ -30,6 +30,7 @@ const (
 	AuthFlowPurposeTwoFASetup        = "2fa_setup"
 	AuthFlowPurposeSecurityProof     = "security_proof"
 	AuthFlowPurposeEmailBinding      = "email_binding"
+	AuthFlowPurposePluginLogin       = "plugin_login"
 	AuthFlowTokenBytes               = 32
 	AuthFlowDefaultCleanupRetention  = 24 * time.Hour
 )
@@ -98,7 +99,11 @@ type AuthFlowAuthorization struct {
 
 // ValidateAuthSessionWithTx rechecks the authoritative identity while holding the
 // user/session locks until the caller's credential change or flow consumption commits.
+// Token-bound identities (pat:<id>) are checked against user_access_tokens instead.
 func ValidateAuthSessionWithTx(tx *gorm.DB, identity AuthSessionIdentity) error {
+	if tokenID, ok := ParseAccessTokenSessionID(identity.SessionID); ok {
+		return validateAccessTokenIdentityWithTx(tx, tokenID, identity)
+	}
 	if identity.UserID <= 0 || identity.SessionID == "" || identity.UserAuthVersion <= 0 || identity.SessionVersion <= 0 {
 		return ErrUserSessionInactive
 	}
@@ -279,6 +284,23 @@ func ConsumeAuthFlowWithAction(token string, match AuthFlowMatch, action func(tx
 		return nil, err
 	}
 	return &consumed, nil
+}
+
+// UpdateAuthFlowPayload replaces the payload of an unconsumed, unexpired flow
+// only while it still holds expected, so of two concurrent submits of one
+// step exactly one proceeds. It reports whether this call made the change;
+// payload must differ from expected.
+func UpdateAuthFlowPayload(token string, match AuthFlowMatch, expected, payload string) (bool, error) {
+	if token == "" || match.Purpose == "" {
+		return false, ErrAuthFlowInvalid
+	}
+	result := applyAuthFlowMatch(DB.Model(&AuthFlow{}), token, match).
+		Where("consumed_at IS NULL AND expires_at > ? AND payload = ?", time.Now(), expected).
+		Update("payload", payload)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected == 1, nil
 }
 
 func DeleteExpiredAuthFlows(now time.Time) error {

@@ -51,6 +51,7 @@ function renderCard(target: MarketplacePlugin) {
   return render(
     <QueryClientProvider client={client}>
       <MarketplacePluginCard
+        kind='task'
         plugin={target}
         indexUrl={INDEX_URL}
         installState={{ status: 'not_installed' }}
@@ -84,7 +85,8 @@ describe('marketplace card logo', () => {
       )
     })
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://raw.githubusercontent.com/QuantumNous/new-api-plugins/main/plugins/tasks/incho/icon.svg'
+      'https://raw.githubusercontent.com/QuantumNous/new-api-plugins/main/plugins/tasks/incho/icon.svg',
+      expect.anything()
     )
   })
 

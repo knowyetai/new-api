@@ -103,11 +103,29 @@ export const BILLING_VARS: BillingVar[] = [
     group: 'cache',
   },
   {
+    key: 'img_cr',
+    field: 'imageCachePrice',
+    tierField: 'image_cache_unit_cost',
+    label: 'Image cache input price',
+    shortLabel: 'Image Cache',
+    side: 'input',
+    group: 'cache',
+  },
+  {
     key: 'cc1h',
     field: 'cacheCreate1hPrice',
     tierField: 'cache_create_1h_unit_cost',
     label: 'Cache create (1h) price',
     shortLabel: 'Cache Write (1h)',
+    side: 'input',
+    group: 'cache',
+  },
+  {
+    key: 'cc12h',
+    field: 'cacheCreate12hPrice',
+    tierField: 'cache_create_12h_unit_cost',
+    label: 'Cache create (12h) price',
+    shortLabel: 'Cache Write (12h)',
     side: 'input',
     group: 'cache',
   },
@@ -171,6 +189,10 @@ export const BILLING_CACHE_VAR_MAP = BILLING_EXTRA_VARS.map((v) => ({
   field: v.tierField as string,
   exprVar: v.key,
 }))
+
+/** Long-lived cache writes cost a fixed multiple of the `cc` write price. */
+export const CLAUDE_CACHE_CREATION_1H_MULTIPLIER = 6 / 3.75
+export const OPENAI_CACHE_CREATION_12H_MULTIPLIER = 2
 
 // ---------------------------------------------------------------------------
 // Request rule constants
@@ -264,6 +286,7 @@ export type TaskTierCondition = {
 }
 
 export type ParsedTaskTier = {
+  conditionText?: string
   label: string
   conditions: TaskTierCondition[]
   constant: number
@@ -279,6 +302,7 @@ function mapTokenTier(
 ): ParsedTier {
   return {
     label: tier.label,
+    ...(tier.imageCount ? { imageCount: true } : {}),
     conditions: tier.conditions,
     ...(tier.billingUnit === 'request'
       ? { billingUnit: tier.billingUnit, fixedPrice: tier.fixedPrice }
@@ -600,19 +624,26 @@ export function splitBillingExprAndRequestRules(expr: string): {
 
   parts.forEach((part) => {
     const parsed = tryParseRequestRuleExpr(part)
-    if (parsed && parsed.length > 0) {
+    const compiled = compileBillingExpression(part)
+    const traced =
+      compiled.status === 'ready' &&
+      compiled.requestRules.some((rule) => rule.node === compiled.ast)
+    if ((parsed && parsed.length > 0) || traced) {
       ruleParts.push(part)
     } else {
       baseParts.push(part)
     }
   })
 
-  if (ruleParts.length === 0 || baseParts.length !== 1) {
+  const quantityParts = baseParts.filter(
+    (part) => unwrapOuterParens(part) === 'image_count'
+  )
+  if (ruleParts.length === 0 || baseParts.length - quantityParts.length !== 1) {
     return { billingExpr: trimmed, requestRuleExpr: '' }
   }
 
   return {
-    billingExpr: unwrapOuterParens(baseParts[0]),
+    billingExpr: baseParts.map(unwrapOuterParens).join(' * '),
     requestRuleExpr: ruleParts.join(' * '),
   }
 }

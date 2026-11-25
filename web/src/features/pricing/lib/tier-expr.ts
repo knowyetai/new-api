@@ -16,7 +16,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { BILLING_CACHE_VAR_MAP } from './billing-expr'
+import {
+  BILLING_CACHE_VAR_MAP,
+  CLAUDE_CACHE_CREATION_1H_MULTIPLIER,
+  OPENAI_CACHE_CREATION_12H_MULTIPLIER,
+} from './billing-expr'
 import { compileBillingExpression } from './billing-expression/parser'
 import { evaluateBillingExpression } from './billing-expression/runtime'
 import type {
@@ -45,6 +49,7 @@ export type VisualTier = {
   cache_read_unit_cost?: number
   cache_create_unit_cost?: number
   cache_create_1h_unit_cost?: number
+  cache_create_12h_unit_cost?: number
   image_unit_cost?: number
   image_output_unit_cost?: number
   audio_input_unit_cost?: number
@@ -56,7 +61,7 @@ export type VisualConfig = {
   tiers: VisualTier[]
 }
 
-export function getTierCacheMode(
+function getTierCacheMode(
   tier: Partial<VisualTier> | null | undefined
 ): CacheMode {
   if (tier?.cache_mode === CACHE_MODE_TIMED) return CACHE_MODE_TIMED
@@ -66,9 +71,7 @@ export function getTierCacheMode(
     : CACHE_MODE_GENERIC
 }
 
-export function normalizeVisualTier(
-  tier: Partial<VisualTier> = {}
-): VisualTier {
+function normalizeVisualTier(tier: Partial<VisualTier> = {}): VisualTier {
   return {
     label: tier.label ?? '',
     input_unit_cost: Number(tier.input_unit_cost) || 0,
@@ -79,6 +82,7 @@ export function normalizeVisualTier(
     cache_read_unit_cost: Number(tier.cache_read_unit_cost) || 0,
     cache_create_unit_cost: Number(tier.cache_create_unit_cost) || 0,
     cache_create_1h_unit_cost: Number(tier.cache_create_1h_unit_cost) || 0,
+    cache_create_12h_unit_cost: Number(tier.cache_create_12h_unit_cost) || 0,
     image_unit_cost: Number(tier.image_unit_cost) || 0,
     image_output_unit_cost: Number(tier.image_output_unit_cost) || 0,
     audio_input_unit_cost: Number(tier.audio_input_unit_cost) || 0,
@@ -100,7 +104,7 @@ export function createDefaultVisualConfig(): VisualConfig {
   }
 }
 
-export function normalizeVisualConfig(
+function normalizeVisualConfig(
   config: VisualConfig | null | undefined
 ): VisualConfig {
   if (!config || !Array.isArray(config.tiers) || config.tiers.length === 0) {
@@ -260,7 +264,9 @@ const ESTIMATOR_VARS = [
   { var: 'cr', stateKey: 'cacheReadTokens' },
   { var: 'cc', stateKey: 'cacheCreateTokens' },
   { var: 'cc1h', stateKey: 'cacheCreate1hTokens' },
+  { var: 'cc12h', stateKey: 'cacheCreate12hTokens' },
   { var: 'img', stateKey: 'imageTokens' },
+  { var: 'img_cr', stateKey: 'imageCacheTokens' },
   { var: 'img_o', stateKey: 'imageOutputTokens' },
   { var: 'ai', stateKey: 'audioInputTokens' },
   { var: 'ao', stateKey: 'audioOutputTokens' },
@@ -289,7 +295,12 @@ export function evalExprLocally(
   const result = evaluateBillingExpression(exprStr, {
     ...context,
     tokens: {
-      ...buildEstimatorTokens(promptTokens, completionTokens, extraTokenValues),
+      ...buildEstimatorTokens(
+        promptTokens,
+        completionTokens,
+        extraTokenValues,
+        exprStr
+      ),
       ...context?.tokens,
     },
   })
@@ -309,22 +320,43 @@ export function evalExprLocally(
 export function buildEstimatorTokens(
   promptTokens: number,
   completionTokens: number,
-  extraTokenValues: ExtraTokenValues
+  extraTokenValues: ExtraTokenValues,
+  exprStr: string
 ): Partial<Record<TokenVariable, number>> {
+  // Like backend token normalization, a long-lived cache write without its
+  // own price joins cc at a fixed multiple. With cc unpriced it stays free.
+  const compiled = compileBillingExpression(exprStr)
+  const usedVars: ReadonlySet<string> =
+    compiled.status === 'ready' ? compiled.variables : new Set()
+  let cacheCreateTokens = extraTokenValues.cacheCreateTokens
+  if (usedVars.has('cc') && !usedVars.has('cc1h')) {
+    cacheCreateTokens +=
+      extraTokenValues.cacheCreate1hTokens * CLAUDE_CACHE_CREATION_1H_MULTIPLIER
+  }
+  if (usedVars.has('cc') && !usedVars.has('cc12h')) {
+    cacheCreateTokens +=
+      extraTokenValues.cacheCreate12hTokens *
+      OPENAI_CACHE_CREATION_12H_MULTIPLIER
+  }
   return {
     p: promptTokens,
     c: completionTokens,
     len:
       promptTokens +
       extraTokenValues.cacheReadTokens +
+      extraTokenValues.imageCacheTokens +
+      extraTokenValues.imageTokens +
+      extraTokenValues.audioInputTokens +
       extraTokenValues.cacheCreateTokens +
-      extraTokenValues.cacheCreate1hTokens,
+      extraTokenValues.cacheCreate1hTokens +
+      extraTokenValues.cacheCreate12hTokens,
     ...Object.fromEntries(
       ESTIMATOR_VARS.map((field) => [
         field.var,
         extraTokenValues[field.stateKey],
       ])
     ),
+    cc: cacheCreateTokens,
   }
 }
 
@@ -334,5 +366,3 @@ export function exprUsesExtraVars(exprStr: string): boolean {
   if (compiled.status !== 'ready') return false
   return ESTIMATOR_VARS.some((field) => compiled.variables.has(field.var))
 }
-
-export const ESTIMATOR_EXTRA_FIELDS = ESTIMATOR_VARS

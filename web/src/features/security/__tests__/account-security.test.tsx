@@ -16,11 +16,24 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { act, render, screen, waitFor, within } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import {
+  act,
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, expect, it, vi } from 'vitest'
+import { createInstance } from 'i18next'
+import { I18nextProvider, initReactI18next } from 'react-i18next'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
+import en from '@/i18n/locales/en.json'
+import zh from '@/i18n/locales/zh.json'
 import { api } from '@/lib/api'
+import { STATUS_QUERY_KEY } from '@/lib/status-query'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { ChangePasswordDialog } from '../components/dialogs/change-password-dialog'
@@ -28,6 +41,7 @@ import { DeleteAccountDialog } from '../components/dialogs/delete-account-dialog
 import { EmailBindDialog } from '../components/dialogs/email-bind-dialog'
 import { TwoFABackupDialog } from '../components/dialogs/two-fa-backup-dialog'
 import { TwoFADisableDialog } from '../components/dialogs/two-fa-disable-dialog'
+import { TwoFASetupDialog } from '../components/dialogs/two-fa-setup-dialog'
 
 const { navigate } = vi.hoisted(() => ({ navigate: vi.fn() }))
 vi.mock('@tanstack/react-router', async (importOriginal) => ({
@@ -35,7 +49,17 @@ vi.mock('@tanstack/react-router', async (importOriginal) => ({
   useNavigate: () => navigate,
 }))
 
+let client: QueryClient
+beforeEach(() => {
+  client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  client.setQueryData(STATUS_QUERY_KEY, { passkey_rp_ids: ['localhost'] })
+})
+
 afterEach(() => {
+  cleanup()
+  client.clear()
   navigate.mockReset()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
@@ -140,7 +164,11 @@ it.each(['2fa', 'passkey'])(
       .mockResolvedValue({ data: { success: true, data: {} } })
     const close = vi.fn()
     const user = userEvent.setup()
-    render(<DeleteAccountDialog open username='user' onOpenChange={close} />)
+    render(
+      <QueryClientProvider client={client}>
+        <DeleteAccountDialog open username='user' onOpenChange={close} />
+      </QueryClientProvider>
+    )
     await user.type(screen.getByRole('textbox'), 'user')
     await user.click(screen.getByRole('button', { name: 'Delete Account' }))
     expect(await screen.findByRole('tab', { name: 'Passkey' })).toHaveAttribute(
@@ -306,7 +334,11 @@ it('disables 2FA through a Passkey proof without asking for an authenticator cod
   const close = vi.fn()
   const success = vi.fn()
   const user = userEvent.setup()
-  render(<TwoFADisableDialog open onOpenChange={close} onSuccess={success} />)
+  render(
+    <QueryClientProvider client={client}>
+      <TwoFADisableDialog open onOpenChange={close} onSuccess={success} />
+    </QueryClientProvider>
+  )
   await user.click(screen.getByRole('checkbox'))
   await user.click(screen.getByRole('button', { name: 'Disable 2FA' }))
   expect(await screen.findByRole('tab', { name: 'Passkey' })).toHaveAttribute(
@@ -426,10 +458,14 @@ it('allows a common new password after verifying the current password once', asy
   render(
     <ChangePasswordDialog open username='user' onOpenChange={onOpenChange} />
   )
-  expect(screen.getByText('Use 8–128 characters.')).toBeVisible()
+  expect(screen.getByLabelText('New Password')).toHaveAccessibleDescription(
+    expect.stringContaining('8–128 characters')
+  )
   await user.type(screen.getByLabelText('Current Password'), 'current-password')
   await user.type(screen.getByLabelText('New Password'), 'password123')
   await user.type(screen.getByLabelText('Confirm New Password'), 'password123')
+  expect(screen.getByText('Easy to guess')).toBeVisible()
+  expect(screen.getByRole('status')).toHaveTextContent('Passwords match')
   await user.click(screen.getByRole('button', { name: 'Change Password' }))
   await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
   expect(get).toHaveBeenCalledWith(
@@ -456,6 +492,31 @@ it('allows a common new password after verifying the current password once', asy
       singleUseAuthorization: true,
     })
   )
+})
+
+it('shows a password confirmation mismatch once after a failed submit', async () => {
+  const put = vi.spyOn(api, 'put')
+  const user = userEvent.setup()
+  render(<ChangePasswordDialog open username='user' onOpenChange={vi.fn()} />)
+  await user.type(screen.getByLabelText('Current Password'), 'current-password')
+  await user.type(screen.getByLabelText('New Password'), 'account-password!42')
+  await user.type(
+    screen.getByLabelText('Confirm New Password'),
+    'account-password!43'
+  )
+  expect(screen.getAllByText('Passwords do not match')).toHaveLength(1)
+
+  await user.click(screen.getByRole('button', { name: 'Change Password' }))
+
+  const confirmation = screen.getByLabelText('Confirm New Password')
+  await waitFor(() =>
+    expect(confirmation).toHaveAttribute('aria-invalid', 'true')
+  )
+  expect(screen.getAllByText('Passwords do not match')).toHaveLength(1)
+  expect(confirmation).toHaveAccessibleDescription(
+    /^\s*Passwords do not match\s*$/
+  )
+  expect(put).not.toHaveBeenCalled()
 })
 
 it.each(['button', 'escape'])(
@@ -722,4 +783,72 @@ it('confirms both email addresses after identity verification and freezes the su
     { flow_token: 'email-flow', new_code: '123456', old_code: '654321' },
     expect.objectContaining({ singleUseAuthorization: true })
   )
+})
+
+it('translates the delete confirmation as a sentence and preserves the literal username on language change', async () => {
+  const i18n = createInstance()
+  await i18n.use(initReactI18next).init({
+    lng: 'zh',
+    fallbackLng: false,
+    nsSeparator: false,
+    resources: { en, zh },
+    interpolation: { escapeValue: false },
+  })
+  const username = 'admin <b>name</b>'
+  render(
+    <I18nextProvider i18n={i18n}>
+      <DeleteAccountDialog open username={username} onOpenChange={vi.fn()} />
+    </I18nextProvider>
+  )
+  expect(
+    screen.getByRole('textbox', { name: `输入 ${username} 以确认` })
+  ).toBeVisible()
+  await act(() => i18n.changeLanguage('en'))
+  expect(
+    screen.getByRole('textbox', { name: `Type ${username} to confirm` })
+  ).toBeVisible()
+  expect(screen.getByRole('button', { name: 'Delete Account' })).toBeDisabled()
+})
+
+it('shows complete translated 2FA step descriptions and updates every step on language change', async () => {
+  const i18n = createInstance()
+  await i18n.use(initReactI18next).init({
+    lng: 'zh',
+    fallbackLng: false,
+    nsSeparator: false,
+    resources: { en, zh },
+    interpolation: { escapeValue: false },
+  })
+  const user = userEvent.setup()
+  render(
+    <I18nextProvider i18n={i18n}>
+      <TwoFASetupDialog
+        open
+        setupData={{
+          secret: 'EXAMPLE',
+          qr_code_data: 'otpauth://totp/example',
+          backup_codes: ['EXAMPLE-CODE'],
+          flow_token: 'example-flow',
+          expires_at: 1234567890,
+        }}
+        loading={false}
+        initializing={false}
+        onCancel={vi.fn()}
+        onEnable={vi.fn()}
+      />
+    </I18nextProvider>
+  )
+  const descriptions = [
+    ['第 1 步，共 3 步：扫描二维码', 'Step 1 of 3: Scan QR Code'],
+    ['第 2 步，共 3 步：保存备份代码', 'Step 2 of 3: Save Backup Codes'],
+    ['第 3 步，共 3 步：验证设置', 'Step 3 of 3: Verify Setup'],
+  ]
+  for (const [chinese, english] of descriptions) {
+    await act(() => i18n.changeLanguage('zh'))
+    expect(screen.getByRole('dialog')).toHaveAccessibleDescription(chinese)
+    await act(() => i18n.changeLanguage('en'))
+    expect(screen.getByRole('dialog')).toHaveAccessibleDescription(english)
+    const next = screen.queryByRole('button', { name: 'Next' })
+    if (next) await user.click(next)
+  }
 })
