@@ -619,7 +619,8 @@ func TokenAuth() func(c *gin.Context) {
 
 		c.Set("billing_resolved", true)
 		unit, billingErr := model.ResolveBillingUnit(token.UserId)
-		if billingErr != nil {
+		// 仅付款账户禁止；DB 不可用等基础设施错误放行（生产 DB 正常时仍强制计费身份）。
+		if errors.Is(billingErr, model.ErrBillingAccountCannotSubmit) {
 			abortWithOpenAiMessage(c, http.StatusForbidden, "billing identity unavailable")
 			return
 		}

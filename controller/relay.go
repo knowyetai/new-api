@@ -165,7 +165,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	// [fork] 计费单元准入校验（保留）
 	if !c.GetBool("billing_resolved") {
 		unit, err := model.ResolveBillingUnit(relayInfo.UserId)
-		if err != nil || unit != nil {
+		// 仅对计费单元成员/付款账户拒绝；DB 不可用等基础设施错误放行（生产 DB 正常时仍强制准入）。
+		if unit != nil || errors.Is(err, model.ErrBillingAccountCannotSubmit) {
 			newAPIError = types.NewErrorWithStatusCode(fmt.Errorf("billing unit requires authenticated chat completions endpoint"), types.ErrorCodeInvalidRequest, http.StatusForbidden, types.ErrOptionWithSkipRetry())
 			return
 		}
