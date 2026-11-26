@@ -84,6 +84,20 @@ function PaymentFixture(props: { values: PaymentValues }) {
           WaffoPancakePrivateKey: '',
           WaffoPancakeReturnURL: '',
         }}
+        lianlianDefaultValues={{
+          LianlianEnabled: false,
+          LianlianTeamTopUpEnabled: false,
+          LianlianEnv: 'test',
+          LianlianGateway: '',
+          LianlianMchId: '',
+          LianlianPrivateKey: '',
+          LianlianPrivateKeyConfigured: false,
+          LianlianClearPrivateKey: false,
+          LianlianPlatformPublicCert: '',
+          LianlianBusiType: '100001',
+          LianlianRiskCategory: '1002',
+        }}
+        lianlianNotifyURL=""
         complianceDefaults={{
           confirmed: true,
           termsVersion: 'v1',

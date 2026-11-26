@@ -427,6 +427,7 @@ func TestTeamBillingIdentityIndependentOfEndpoint(t *testing.T) {
 	router.ServeHTTP(res, req)
 	assert.Equal(t, http.StatusForbidden, res.Code)
 	assert.Contains(t, res.Body.String(), "billing account unavailable")
+}
 
 func createMiddlewareScopedToken(t *testing.T, userID int, expiresAt int64, scopes ...string) (string, *model.UserAccessToken) {
 	t.Helper()
