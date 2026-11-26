@@ -1454,7 +1454,7 @@ func TestRequestLianlianPaySkipsWalletCapacityThatWouldOverflow(t *testing.T) {
 		Update("quota", common.MaxWalletQuota-100_000).Error)
 
 	recorder := postLianlianPay(t, router, `{"amount":2000,"payment_method":"alipay"}`)
-	assert.Contains(t, recorder.Body.String(), "top-up quota limit exceeded")
+	assert.Contains(t, recorder.Body.String(), "Top-up quota limit exceeded")
 	assert.Zero(t, env.requests)
 }
 
@@ -1508,7 +1508,7 @@ func TestManualCompleteLianlianTopUpUsesAmountCents(t *testing.T) {
 
 	var topUpLog model.Log
 	require.NoError(t, model.LOG_DB.Order("id desc").First(&topUpLog).Error)
-	assert.Contains(t, topUpLog.Content, "支付金额：10.000000")
+	assert.Contains(t, topUpLog.Content, "payment amount: 10.000000")
 }
 
 func TestReconcileLianlianTopUpsSettlesPaidPendingOrder(t *testing.T) {

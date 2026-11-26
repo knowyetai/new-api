@@ -72,7 +72,7 @@ var (
 	ErrTopUpNotFound             = errors.New("topup not found")
 	ErrTopUpStatusInvalid        = errors.New("topup status invalid")
 	ErrInvalidTopUpQuota         = errors.New("invalid top-up quota")
-	ErrTopUpQuotaLimitExceeded   = errors.New("top-up quota limit exceeded")
+	ErrTopUpQuotaLimitExceeded   = common.NewMessage("Top-up quota limit exceeded")
 	ErrWalletQuotaLimitExceeded  = errors.New("wallet quota limit exceeded")
 	ErrInvalidAmountUnit         = errors.New("invalid top-up amount unit")
 	ErrInvalidAmountExchangeRate = errors.New("invalid top-up amount exchange rate")

@@ -414,7 +414,7 @@ func newBillingSessionForPayer(c *gin.Context, relayInfo *relaycommon.RelayInfo,
 		}
 		if relayInfo.BillingUnitId == 0 && userQuota-preConsumedQuota < 0 {
 			return nil, types.NewErrorWithStatusCode(
-				errors.New(i18n.T(c, i18n.MsgQuotaPreConsumeInsufficient, map[string]any{"Remaining": logger.FormatQuota(userQuota), "Required": logger.FormatQuota(preConsumedQuota)})),
+				fmt.Errorf("%w: %s", ErrInsufficientWalletQuota, i18n.T(c, i18n.MsgQuotaPreConsumeInsufficient, map[string]any{"Remaining": logger.FormatQuota(userQuota), "Required": logger.FormatQuota(preConsumedQuota)})),
 				types.ErrorCodeInsufficientUserQuota, http.StatusForbidden,
 				types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
 		}
