@@ -7,6 +7,9 @@ import (
 	"strings"
 )
 
+// ErrBillingAccountCannotSubmit 标识计费单元付款账户禁止直接提交推理。
+var ErrBillingAccountCannotSubmit = errors.New("billing account cannot submit inference")
+
 type BillingUnit struct {
 	Id          int     `json:"id" gorm:"primaryKey"`
 	Name        string  `json:"name" gorm:"type:varchar(128)"`
@@ -22,12 +25,17 @@ type BillingUnitMember struct {
 // ResolveBillingUnit reads membership once. Callers retain the result for the
 // complete request, including retries, settlement and refunds.
 func ResolveBillingUnit(userId int) (*BillingUnit, error) {
+	// 计费单元未初始化（如未启用团队计费的部署/测试环境）时视为无计费单元，
+	// 避免对普通中继请求误判；生产环境 DB 正常时仍强制计费单元准入。
+	if DB == nil {
+		return nil, nil
+	}
 	var payerCount int64
 	if err := DB.Model(&BillingUnit{}).Where("payer_user_id = ?", userId).Count(&payerCount).Error; err != nil {
 		return nil, err
 	}
 	if payerCount > 0 {
-		return nil, errors.New("billing account cannot submit inference")
+		return nil, ErrBillingAccountCannotSubmit
 	}
 	var member BillingUnitMember
 	err := DB.First(&member, "user_id = ?", userId).Error

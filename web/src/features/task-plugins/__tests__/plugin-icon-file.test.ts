@@ -111,6 +111,25 @@ describe('fetchPluginIconDataUri', () => {
     )
   })
 
+  test('revalidates with the host so a stale browser-cached logo does not fail the digest', async () => {
+    const result = await fetchPluginIconDataUri(
+      'https://raw.example/plugins/tasks/incho/icon.svg',
+      {
+        sha256:
+          'd4dc56669143034f31aa309635d4113d9ad76a02b1739da22c965ed2049be9e6',
+        fetchImpl: async (_input, init) =>
+          okResponse(
+            ['no-cache', 'no-store', 'reload'].includes(
+              init?.cache ?? 'default'
+            )
+              ? '<svg/>'
+              : '<svg>stale</svg>'
+          ),
+      }
+    )
+    assert.equal(result, 'data:image/svg+xml;base64,PHN2Zy8+')
+  })
+
   test('returns null for a non-image path, a failed response, or a network error', async () => {
     assert.equal(
       await fetchPluginIconDataUri('https://raw.example/icon.js', {
@@ -129,6 +148,40 @@ describe('fetchPluginIconDataUri', () => {
         fetchImpl: async () => {
           throw new TypeError('offline')
         },
+      }),
+      null
+    )
+  })
+})
+
+describe('fetchPluginIconDataUri for files named by their digest', () => {
+  const pngBytes = new Uint8Array([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0,
+  ])
+  const url = `https://www.newapi.ai/api/v1/community/files/${'a'.repeat(64)}`
+  const respond = (body: BodyInit) => async () =>
+    new Response(body, {
+      status: 200,
+      headers: { 'content-type': 'application/octet-stream' },
+    })
+
+  test('tells an svg from a png by its bytes', async () => {
+    assert.equal(
+      await fetchPluginIconDataUri(url, {
+        fetchImpl: respond('<?xml version="1.0"?>\n<svg/>'),
+      }),
+      `data:image/svg+xml;base64,${btoa('<?xml version="1.0"?>\n<svg/>')}`
+    )
+    const png = await fetchPluginIconDataUri(url, {
+      fetchImpl: respond(pngBytes),
+    })
+    assert.ok(png?.startsWith('data:image/png;base64,'))
+  })
+
+  test('drops a file that is neither svg nor png', async () => {
+    assert.equal(
+      await fetchPluginIconDataUri(url, {
+        fetchImpl: respond('<html><script>1</script></html>'),
       }),
       null
     )

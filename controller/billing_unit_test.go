@@ -270,7 +270,7 @@ func TestIntegrationDisplayNameOAuthLogin(t *testing.T) {
 		response := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(response)
 		ctx.Request = httptest.NewRequest("GET", "/api/oauth/local", nil)
-		handleOAuthLogin(ctx, oauth.NewGenericOAuthProvider(&provider), &oauth.OAuthUser{ProviderUserID: "stable-subject", DisplayName: name}, &model.AuthFlow{Payload: "{}"})
+		handleOAuthLogin(ctx, oauth.NewGenericOAuthProvider(&provider), &oauth.OAuthUser{ProviderUserID: "stable-subject", DisplayName: name}, nil, &model.AuthFlow{Payload: "{}"})
 		var result struct {
 			Success bool `json:"success"`
 			Data    struct {

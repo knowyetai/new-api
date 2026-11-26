@@ -18,16 +18,17 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Download } from 'lucide-react'
-import { useState } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { toast } from 'sonner'
 
 import { Dialog } from '@/components/dialog'
+import { LoadingState } from '@/components/loading-state'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Combobox } from '@/components/ui/combobox'
 import { Spinner } from '@/components/ui/spinner'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { MODEL_PRICING_ISSUES_QUERY_KEY } from '@/features/system-settings/models/pricing-issues'
 
 import {
   activateTaskPlugin,
@@ -36,9 +37,11 @@ import {
 } from '../api'
 import {
   findMarketplaceVersion,
+  marketplaceSourceKind,
   resolvePluginSourceUrl,
   type InstallState,
 } from '../lib/marketplace'
+import { toastPluginChange } from '../lib/plugin-change-toast'
 import { fetchPluginIconDataUri } from '../lib/plugin-icon-file'
 import {
   computeSourceSha256,
@@ -46,11 +49,24 @@ import {
   PluginSourceFetchError,
 } from '../lib/plugin-url'
 import type { MarketplacePlugin, MarketplaceSource } from '../types'
+import { CommunityPluginReach } from './community-plugin-reach'
 import { JavaScriptViewer } from './javascript-viewer'
 import { MarketplaceCapabilities } from './marketplace-capabilities'
+import { MarketplaceAuthorLine } from './marketplace-plugin-card'
 import { PluginIcon } from './plugin-icon'
 import { PluginIntegrityCheck } from './plugin-integrity-check'
 import { SourceDiff } from './source-diff'
+
+const PluginChangelogPanel = lazy(() =>
+  import('./plugin-changelog-panel').then((module) => ({
+    default: module.PluginChangelogPanel,
+  }))
+)
+const PluginReadmeSection = lazy(() =>
+  import('./plugin-readme-section').then((module) => ({
+    default: module.PluginReadmeSection,
+  }))
+)
 
 export type MarketplaceInstallTarget = {
   source: MarketplaceSource
@@ -86,6 +102,7 @@ function MarketplaceInstallContent(
   const entry = findMarketplaceVersion(target.plugin, selectedVersion)
   const hasInstalledPlugin = target.installState.status !== 'not_installed'
   const [reviewTab, setReviewTab] = useState('details')
+  const sourceKind = marketplaceSourceKind(target.source.index_url)
 
   const sourceQuery = useQuery({
     queryKey: [
@@ -104,7 +121,7 @@ function MarketplaceInstallContent(
       const url = resolvePluginSourceUrl(target.source.index_url, entry.path)
       if (!url) {
         throw new Error(
-          t('This plugin path does not resolve within the source repository.')
+          t('The source gives an invalid address for this plugin.')
         )
       }
       const text = await fetchPluginSourceText(url)
@@ -152,9 +169,14 @@ function MarketplaceInstallContent(
         sourceSha256: entry.sha256,
         remark: `${target.source.name} v${selectedVersion}`,
         icon: sourceQuery.data.icon ?? undefined,
+        marketplaceIndexUrl: target.source.index_url,
       })
       if (detail.plugin && !detail.plugin.active) {
-        await activateTaskPlugin(detail.meta.key, detail.meta.version)
+        const notice = await activateTaskPlugin(
+          detail.meta.key,
+          detail.meta.version
+        )
+        return { ...detail, pricing_issues: notice?.pricing_issues ?? [] }
       }
       return detail
     },
@@ -164,13 +186,17 @@ function MarketplaceInstallContent(
       queryClient.invalidateQueries({
         queryKey: ['task-plugin-versions', pluginKey],
       })
+      queryClient.invalidateQueries({
+        queryKey: MODEL_PRICING_ISSUES_QUERY_KEY,
+      })
     },
     onSuccess: (detail) => {
-      toast.success(
+      toastPluginChange(
         t('Installed {{name}} v{{version}}', {
           name: detail.meta.name,
           version: detail.meta.version,
-        })
+        }),
+        detail.pricing_issues
       )
       props.onOpenChange(false)
     },
@@ -181,10 +207,8 @@ function MarketplaceInstallContent(
   if (fetchError instanceof PluginSourceFetchError) {
     fetchErrorMessage =
       fetchError.reason === 'too_large'
-        ? t('Plugin source exceeds the 1 MiB limit.')
-        : t(
-            'Could not fetch the plugin source from this browser. The host may block cross-origin requests or be unreachable.'
-          )
+        ? t('Plugin source exceeds the 8 MiB limit.')
+        : t('Could not download the plugin code. Try again later.')
   } else if (fetchError) {
     fetchErrorMessage = fetchError.message
   }
@@ -270,6 +294,7 @@ function MarketplaceInstallContent(
         </>
       }
     >
+      <MarketplaceAuthorLine plugin={target.plugin} />
       <div className='space-y-2'>
         <Combobox
           aria-label={t('Select version')}
@@ -300,7 +325,10 @@ function MarketplaceInstallContent(
             }
             installMutation.reset()
             setSelectedVersion(version)
-            if (target.installState.status !== 'not_installed') {
+            if (
+              target.installState.status !== 'not_installed' &&
+              reviewTab !== 'changelog'
+            ) {
               setReviewTab(
                 version === target.installState.installedVersion
                   ? 'details'
@@ -318,18 +346,31 @@ function MarketplaceInstallContent(
           </p>
         )}
       </div>
+      {sourceKind !== 'official' && (
+        <CommunityPluginReach
+          plugin={target.plugin}
+          version={entry}
+          source={sourceQuery.data?.text}
+        />
+      )}
       <Tabs
         value={reviewTab}
         onValueChange={setReviewTab}
         className='min-w-0 gap-3'
       >
-        <TabsList className='w-full'>
-          <TabsTrigger value='details'>{t('Plugin details')}</TabsTrigger>
-          {hasInstalledPlugin && (
-            <TabsTrigger value='diff'>{t('Version differences')}</TabsTrigger>
-          )}
-          <TabsTrigger value='source'>{t('Full source')}</TabsTrigger>
-        </TabsList>
+        <div className='min-w-0 overflow-x-auto'>
+          <TabsList
+            className='w-full min-w-max'
+            aria-label={t('Plugin details')}
+          >
+            <TabsTrigger value='details'>{t('Plugin details')}</TabsTrigger>
+            {hasInstalledPlugin && (
+              <TabsTrigger value='diff'>{t('Version differences')}</TabsTrigger>
+            )}
+            <TabsTrigger value='source'>{t('Full source')}</TabsTrigger>
+            <TabsTrigger value='changelog'>{t('Changelog')}</TabsTrigger>
+          </TabsList>
+        </div>
         {hasInstalledPlugin && (
           <TabsContent value='diff' className='min-w-0 space-y-2'>
             {sourceStatus}
@@ -357,6 +398,19 @@ function MarketplaceInstallContent(
           </TabsContent>
         )}
         <TabsContent value='details' className='min-w-0 space-y-2'>
+          {reviewTab === 'details' && (
+            <Suspense
+              fallback={
+                <LoadingState inline size='sm' message={t('Loading...')} />
+              }
+            >
+              <PluginReadmeSection
+                indexUrl={target.source.index_url}
+                plugin={target.plugin}
+                version={selectedVersion}
+              />
+            </Suspense>
+          )}
           {sourceStatus}
           <MarketplaceCapabilities
             plugin={target.plugin}
@@ -367,31 +421,52 @@ function MarketplaceInstallContent(
             }}
           />
         </TabsContent>
+        <TabsContent value='changelog' className='min-w-0 space-y-2'>
+          {reviewTab === 'changelog' && (
+            <Suspense fallback={<LoadingState />}>
+              <PluginChangelogPanel
+                indexUrl={target.source.index_url}
+                plugin={target.plugin}
+                version={selectedVersion}
+              />
+            </Suspense>
+          )}
+        </TabsContent>
         <TabsContent value='source' className='min-w-0 space-y-2'>
           {sourceStatus}
           {!sourceQuery.isError && sourcePreview}
         </TabsContent>
       </Tabs>
 
-      <Alert className='border-amber-500/20 bg-amber-500/5 py-2 [&>svg]:text-amber-600 dark:[&>svg]:text-amber-400'>
-        <AlertTriangle />
-        <AlertDescription className='text-foreground/80 text-xs leading-relaxed'>
-          {t(
-            'Plugins can access channel credentials. Review the source and differences before installing.'
-          )}
-        </AlertDescription>
-      </Alert>
+      {sourceKind === 'official' && (
+        <Alert className='border-amber-500/20 bg-amber-500/5 py-2 [&>svg]:text-amber-600 dark:[&>svg]:text-amber-400'>
+          <AlertTriangle />
+          <AlertDescription className='text-foreground/80 text-xs leading-relaxed'>
+            {t(
+              'Plugins can access channel credentials. Review the source and differences before installing.'
+            )}
+          </AlertDescription>
+        </Alert>
+      )}
       <PluginIntegrityCheck
         compact
-        sourceAvailable={Boolean(sourceQuery.data)}
         expected={entry?.sha256}
         digest={sourceQuery.data?.digest}
         isLoading={sourceQuery.isFetching}
       />
+      {sourceKind === 'community' && (
+        <p className='text-muted-foreground text-xs'>
+          {t(
+            'Installing sends the plugin name, its version and a random ID of this gateway to newapi.ai to count installs.'
+          )}
+        </p>
+      )}
 
       {target.installState.status === 'diverged' && (
         <Alert>
-          <AlertTitle>{t('Installed version is not in this index')}</AlertTitle>
+          <AlertTitle>
+            {t('Installed version is not listed by this source')}
+          </AlertTitle>
           <AlertDescription>
             {t(
               'v{{installed}} is installed but this source does not list it. Installing replaces it with v{{target}}.',
@@ -415,7 +490,7 @@ function MarketplaceInstallContent(
           </p>
           <p className='text-muted-foreground text-xs'>
             {t(
-              'Marketplace installs never force past a conflict. Resolve it on the task plugins page, then install again.'
+              'Resolve the conflict on the Installed tab, then install again.'
             )}
           </p>
         </div>

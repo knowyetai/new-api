@@ -1,9 +1,11 @@
 package model
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"slices"
 	"sort"
 	"time"
 
@@ -11,22 +13,25 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"gorm.io/gorm/schema"
 )
 
 type TaskPluginChannelRef struct {
 	Id   int    `json:"id"`
 	Name string `json:"name"`
+	Type int    `json:"type"`
 }
 
 func GetTaskPluginUsage(key string) ([]TaskPluginChannelRef, int64, error) {
 	var channels []Channel
-	if err := DB.Where("type = ? AND status = ?", constant.ChannelTypeTaskPlugin, common.ChannelStatusEnabled).Find(&channels).Error; err != nil {
+	boundTypes := []int{constant.ChannelTypeTaskPlugin, constant.ChannelTypeNewAPI}
+	if err := DB.Where("type IN ? AND status = ?", boundTypes, common.ChannelStatusEnabled).Find(&channels).Error; err != nil {
 		return nil, 0, err
 	}
 	refs := make([]TaskPluginChannelRef, 0)
 	for _, channel := range channels {
-		if channel.GetSetting().TaskPluginKey == key {
-			refs = append(refs, TaskPluginChannelRef{Id: channel.Id, Name: channel.Name})
+		if channel.GetSetting().BindsTaskPlugin(key) {
+			refs = append(refs, TaskPluginChannelRef{Id: channel.Id, Name: channel.Name, Type: channel.Type})
 		}
 	}
 	var inFlight int64
@@ -34,25 +39,64 @@ func GetTaskPluginUsage(key string) ([]TaskPluginChannelRef, int64, error) {
 	return refs, inFlight, err
 }
 
+// UnbindTaskPlugin removes one plugin from a channel's bindings and reports
+// whether the channel changed. A New API gateway channel keeps serving its other
+// plugins and its ordinary traffic.
+func UnbindTaskPlugin(channelID int, key string) (bool, error) {
+	channel, err := GetChannelById(channelID, false)
+	if err != nil {
+		return false, err
+	}
+	setting := channel.GetSetting()
+	if !setting.BindsTaskPlugin(key) {
+		return false, nil
+	}
+	if setting.TaskPluginKey == key {
+		setting.TaskPluginKey = ""
+	}
+	setting.TaskExtendPluginKeys = slices.DeleteFunc(setting.TaskExtendPluginKeys, func(bound string) bool { return bound == key })
+	channel.SetSetting(setting)
+	if err = DB.Model(&Channel{}).Where("id = ?", channelID).Update("setting", channel.Setting).Error; err != nil {
+		return true, err
+	}
+	BumpSyncTopic(SyncTopicChannels)
+	return true, nil
+}
+
+// LongText is a string column sized for plugin payloads on every supported
+// database: longtext on MySQL, text on PostgreSQL and SQLite. A bare
+// `type:text` tag stops at 64 KiB on MySQL. A `size:` tag above that becomes
+// varchar(N) on PostgreSQL, which rejects sizes past 10485760, and a NOT NULL
+// column declared that way is re-altered by AutoMigrate on every MySQL start
+// because the reported column length never equals N. Neither type chosen here
+// carries a length, so an up-to-date column is left alone, and MySQL widens a
+// shipped text column once, without data loss.
+type LongText string
+
+func (LongText) GormDBDataType(db *gorm.DB, _ *schema.Field) string {
+	if db.Dialector.Name() == string(common.DatabaseTypeMySQL) {
+		return "longtext"
+	}
+	return "text"
+}
+
 type TaskPlugin struct {
-	Id         int64  `json:"id"`
-	Key        string `json:"key" gorm:"size:128;not null;uniqueIndex:uk_task_plugin_key_version,priority:1"`
-	APIVersion int    `json:"api_version" gorm:"not null"`
-	Version    string `json:"version" gorm:"size:64;not null;uniqueIndex:uk_task_plugin_key_version,priority:2"`
-	Source     string `json:"source" gorm:"type:text;not null"`
-	SourceHash string `json:"source_hash" gorm:"size:64;not null"`
+	Id         int64    `json:"id"`
+	Key        string   `json:"key" gorm:"size:128;not null;uniqueIndex:uk_task_plugin_key_version,priority:1"`
+	APIVersion int      `json:"api_version" gorm:"not null"`
+	Version    string   `json:"version" gorm:"size:64;not null;uniqueIndex:uk_task_plugin_key_version,priority:2"`
+	Source     LongText `json:"source" gorm:"not null"`
+	SourceHash string   `json:"source_hash" gorm:"size:64;not null"`
 	// Icon is the plugin logo shipped as a sidecar icon.svg / icon.png next to
 	// plugin.js, stored as a data URI so one column carries both the media
 	// type and the bytes. It never travels inside list or detail JSON; the UI
-	// loads it through GET /api/plugin/task/:key/icon. size matches the
-	// 512 KiB icon cap and makes GORM emit mediumtext on MySQL (a bare TEXT
-	// column there holds only 64 KiB), varchar(524288) on PostgreSQL, and text
-	// on SQLite.
-	Icon      string `json:"-" gorm:"size:524288"`
-	Enabled   bool   `json:"enabled" gorm:"not null"`
-	Active    bool   `json:"active" gorm:"not null;index"`
-	CreatedAt int64  `json:"created_at" gorm:"not null"`
-	Remark    string `json:"remark" gorm:"type:text"`
+	// loads it through GET /api/plugin/task/:key/icon. LongText keeps the
+	// 512 KiB icon cap storable on MySQL, where a bare TEXT holds only 64 KiB.
+	Icon      LongText `json:"-"`
+	Enabled   bool     `json:"enabled" gorm:"not null"`
+	Active    bool     `json:"active" gorm:"not null;index"`
+	CreatedAt int64    `json:"created_at" gorm:"not null"`
+	Remark    string   `json:"remark" gorm:"type:text"`
 }
 
 // HasIcon reports whether this version ships a logo.
@@ -61,7 +105,7 @@ func (plugin TaskPlugin) HasIcon() bool {
 }
 
 func SaveTaskPlugin(plugin *TaskPlugin) error {
-	return DB.Transaction(func(tx *gorm.DB) error {
+	err := DB.Transaction(func(tx *gorm.DB) error {
 		var existing TaskPlugin
 		err := tx.Where(&TaskPlugin{Key: plugin.Key, Version: plugin.Version}).First(&existing).Error
 		if err == nil {
@@ -92,6 +136,10 @@ func SaveTaskPlugin(plugin *TaskPlugin) error {
 		plugin.Active = count == 0
 		return tx.Create(plugin).Error
 	})
+	if err == nil {
+		BumpSyncTopic(SyncTopicPlugins)
+	}
+	return err
 }
 
 func ListTaskPluginVersions(key string) ([]TaskPlugin, error) {
@@ -124,12 +172,17 @@ func GetTaskPluginVersion(key, version string) (*TaskPlugin, error) {
 	return &plugin, nil
 }
 
+// ListActiveTaskPlugins returns the enabled override rows without their
+// source and icon payloads; see GetTaskPluginSyncSnapshot.
 func ListActiveTaskPlugins() ([]TaskPlugin, error) {
 	snapshot, err := GetTaskPluginSyncSnapshot()
 	return snapshot.Plugins, err
 }
 
 type TaskPluginSyncSnapshot struct {
+	// Plugins are the enabled active overrides with Source and Icon left
+	// empty. Sync compares SourceHash against what it already compiled and
+	// loads source through GetTaskPluginSource only for the rows that changed.
 	Plugins  []TaskPlugin
 	Revision string
 }
@@ -137,9 +190,11 @@ type TaskPluginSyncSnapshot struct {
 // GetTaskPluginSyncSnapshot returns the enabled override set together with a
 // deterministic revision of every active database override. Nodes can compare
 // the revision even though their local routing-generation counters differ.
+// The query skips the source and icon columns: every node polls this every
+// 30 seconds, and plugin sources may be several MiB each.
 func GetTaskPluginSyncSnapshot() (TaskPluginSyncSnapshot, error) {
 	var activePlugins []TaskPlugin
-	if err := DB.Where(&TaskPlugin{Active: true}).
+	if err := DB.Omit("source", "icon").Where(&TaskPlugin{Active: true}).
 		Order(clause.OrderByColumn{Column: clause.Column{Name: "key"}}).
 		Order(clause.OrderByColumn{Column: clause.Column{Name: "version"}}).
 		Order(clause.OrderByColumn{Column: clause.Column{Name: "id"}}).
@@ -185,8 +240,18 @@ func GetTaskPluginSyncSnapshot() (TaskPluginSyncSnapshot, error) {
 	}, nil
 }
 
+// GetTaskPluginSource loads one override's JavaScript by row id. Rows never
+// change source in place (SaveTaskPlugin rejects a different source for the
+// same key and version), so the id from a sync snapshot identifies exactly the
+// text whose SourceHash that snapshot reported.
+func GetTaskPluginSource(id int64) (LongText, error) {
+	var plugin TaskPlugin
+	err := DB.Select("source").Where(&TaskPlugin{Id: id}).Take(&plugin).Error
+	return plugin.Source, err
+}
+
 func ActivateTaskPlugin(key, version string) error {
-	return DB.Transaction(func(tx *gorm.DB) error {
+	err := DB.Transaction(func(tx *gorm.DB) error {
 		var target TaskPlugin
 		if err := tx.Where(&TaskPlugin{Key: key, Version: version}).First(&target).Error; err != nil {
 			return err
@@ -196,6 +261,10 @@ func ActivateTaskPlugin(key, version string) error {
 		}
 		return tx.Model(&target).Updates(map[string]any{"active": true, "enabled": true}).Error
 	})
+	if err == nil {
+		BumpSyncTopic(SyncTopicPlugins)
+	}
+	return err
 }
 
 func SetTaskPluginEnabled(key string, enabled bool) error {
@@ -206,6 +275,7 @@ func SetTaskPluginEnabled(key string, enabled bool) error {
 	if result.RowsAffected == 0 {
 		return gorm.ErrRecordNotFound
 	}
+	BumpSyncTopic(SyncTopicPlugins)
 	return nil
 }
 
@@ -247,5 +317,38 @@ func DeleteTaskPluginVersion(key, version string) (TaskPluginDeleteResult, error
 		result.Promoted = &promoted
 		return nil
 	})
+	if err == nil {
+		BumpSyncTopic(SyncTopicPlugins)
+	}
 	return result, err
+}
+
+// TaskPluginGatewayIDKey names the option row holding the random gateway id
+// sent with community plugin install counts.
+const TaskPluginGatewayIDKey = "TaskPluginGatewayID"
+
+// GetTaskPluginGatewayID returns the gateway id, creating it on first use. The
+// first node to insert the row wins, so every node reads the same value.
+func GetTaskPluginGatewayID() (string, error) {
+	var option Option
+	err := DB.Where(&Option{Key: TaskPluginGatewayIDKey}).First(&option).Error
+	if err == nil {
+		return option.Value, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", err
+	}
+	random := make([]byte, 32)
+	if _, err = rand.Read(random); err != nil {
+		return "", err
+	}
+	candidate := Option{Key: TaskPluginGatewayIDKey, Value: hex.EncodeToString(random)}
+	if err = DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&candidate).Error; err != nil {
+		return "", err
+	}
+	option = Option{}
+	if err = DB.Where(&Option{Key: TaskPluginGatewayIDKey}).First(&option).Error; err != nil {
+		return "", err
+	}
+	return option.Value, nil
 }

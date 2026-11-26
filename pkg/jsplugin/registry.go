@@ -8,7 +8,6 @@ import (
 	"math"
 	"net"
 	"net/url"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -19,6 +18,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/MoeForge/moego/regexp"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
@@ -31,6 +31,8 @@ const APIVersion1 = 1
 const (
 	maxLocalizedTextLocales       = 16
 	maxMetaDescriptionRunes       = 512
+	maxMetaNameRunes              = 128
+	maxMetaKeyHintRunes           = 256
 	maxUsageFieldDescriptionRunes = 256
 )
 
@@ -39,6 +41,11 @@ var websiteHostLabelPattern = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,
 var pluginKeyPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 var pluginVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$`)
 var localeTagPattern = regexp.MustCompile(`^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})*$`)
+
+// ValidPluginKey checks the canonical identifier accepted by plugin manifests.
+func ValidPluginKey(key string) bool {
+	return len(key) <= 30 && pluginKeyPattern.MatchString(key)
+}
 
 // LocalizedText is locale-keyed display copy. Plugin source may use a bare
 // string (normalized to {"en": s}) or a map that must include "en". API
@@ -79,25 +86,266 @@ func (t *LocalizedText) UnmarshalJSON(data []byte) error {
 }
 
 type Meta struct {
-	SortPriority  int                         `json:"sortPriority,omitempty"`
-	Website       string                      `json:"website,omitempty"`
-	APIVersion    int                         `json:"apiVersion"`
-	Key           string                      `json:"key"`
-	Name          string                      `json:"name"`
-	Icon          string                      `json:"icon,omitempty"`
-	Description   LocalizedText               `json:"description,omitempty"`
-	Version       string                      `json:"version"`
-	Author        AuthorMeta                  `json:"author"`
-	BaseURL       string                      `json:"baseUrl,omitempty"`
-	ChannelTypes  []int                       `json:"channelTypes,omitempty"`
-	Models        []string                    `json:"models"`
-	FetchMode     string                      `json:"fetchMode"`
-	AllowedHosts  []string                    `json:"allowedHosts"`
-	Routes        []Route                     `json:"routes"`
-	Protocols     []ProtocolClaim             `json:"protocols"`
-	UsageSchema   map[string]UsageFieldSchema `json:"usageSchema,omitempty"`
-	UsageExamples []UsageExample              `json:"usageExamples,omitempty"`
-	Auth          AuthMeta                    `json:"auth"`
+	RequiredCapabilities []string                    `json:"requiredCapabilities,omitempty"`
+	SubmitResponseTypes  []string                    `json:"submitResponseTypes,omitempty"`
+	SortPriority         int                         `json:"sortPriority,omitempty"`
+	Website              string                      `json:"website,omitempty"`
+	APIVersion           int                         `json:"apiVersion"`
+	Key                  string                      `json:"key"`
+	Name                 string                      `json:"name"`
+	NameI18n             LocalizedText               `json:"name_i18n,omitempty"` // the locales of a name given as an object; Name is its en text
+	Icon                 string                      `json:"icon,omitempty"`
+	Description          LocalizedText               `json:"description,omitempty"`
+	Version              string                      `json:"version"`
+	Author               AuthorMeta                  `json:"author"`
+	BaseURL              string                      `json:"baseUrl,omitempty"`
+	ChannelTypes         []int                       `json:"channelTypes,omitempty"`
+	Models               []string                    `json:"models"`
+	FetchMode            string                      `json:"fetchMode"`
+	AllowedHosts         []string                    `json:"allowedHosts"`
+	Upstreams            []string                    `json:"upstreams,omitempty"`
+	Routes               []Route                     `json:"routes"`
+	Protocols            []ProtocolClaim             `json:"protocols"`
+	UsageSchema          map[string]UsageFieldSchema `json:"usageSchema,omitempty"`
+	UsageExamples        []UsageExample              `json:"usageExamples,omitempty"`
+	UsageProfiles        []UsageProfile              `json:"usageProfiles,omitempty"`
+	Auth                 AuthMeta                    `json:"auth"`
+	// Relay is the provider part: the Advanced Custom routes a type-61
+	// channel bound to the plugin serves.
+	Relay []dto.AdvancedCustomRoute `json:"relay,omitempty"`
+	// ConfigSchema is the schema of a request processing instance's config.
+	ConfigSchema *ConfigSchema `json:"configSchema,omitempty"`
+	// ChannelConfig is the schema of the plugin config of a type-61 channel
+	// bound to the plugin, stored in its settings as plugin_config.
+	ChannelConfig *ConfigSchema `json:"channelConfig,omitempty"`
+	// KeyHint is the hint and example of the channel key field.
+	KeyHint LocalizedText `json:"keyHint,omitempty"`
+	// Optional lets a request skip an instance of the plugin that fails at a
+	// stage; without it the failure stops the request.
+	Optional bool `json:"optional,omitempty"`
+	// Samples are the requests the request plugin editor offers to try the
+	// plugin with.
+	Samples []Sample `json:"samples,omitempty"`
+	// noTaskPart marks a plugin that does not export buildSubmitRequest.
+	// CompilePlugin sets it; a Meta built by hand has the task part.
+	noTaskPart bool
+	// transformHooks are the stage hooks the plugin exports, in
+	// TransformStages order, then ReportHook. CompilePlugin sets them.
+	transformHooks []string
+}
+
+// ProviderConverter is the relay converter whose request and response the
+// plugin's convertRequest, convertResponse and convertStreamEvent convert; on
+// the model list route convertResponse alone runs. Only manifests accept it;
+// Advanced Custom channel settings reject it.
+const ProviderConverter = "plugin"
+
+// chainedConverterSuffix ends a converter that chains a registered converter
+// and the plugin's convert hooks: the host converts the client protocol into
+// the registered converter's upstream protocol, and the hooks convert that
+// protocol into the vendor's and back.
+const chainedConverterSuffix = "+" + ProviderConverter
+
+// SplitProviderConverter returns the converter the host runs for a route
+// converter and whether the plugin's convert hooks run too: "plugin" is "none"
+// with the hooks, "<converter>+plugin" that converter with the hooks, and any
+// other value itself without them.
+func SplitProviderConverter(converter string) (hostConverter string, hooks bool) {
+	converter = strings.TrimSpace(converter)
+	if converter == ProviderConverter {
+		return "none", true
+	}
+	if base, chained := strings.CutSuffix(converter, chainedConverterSuffix); chained {
+		return base, true
+	}
+	return converter, false
+}
+
+// HasTaskPart reports whether the plugin is a task driver: it exports
+// buildSubmitRequest.
+func (m Meta) HasTaskPart() bool {
+	return !m.noTaskPart
+}
+
+// HasProviderPart reports whether the plugin declares relay routes.
+func (m Meta) HasProviderPart() bool {
+	return len(m.Relay) > 0
+}
+
+// RelayConfig returns the relay routes as the Advanced Custom configuration
+// of one request. A plugin-converter route reaches the Advanced Custom code as
+// a native route of its client protocol, and a chained one as a route of its
+// registered converter; the provider adaptor converts around it.
+func (m Meta) RelayConfig() *dto.AdvancedCustomConfig {
+	if len(m.Relay) == 0 {
+		return nil
+	}
+	routes := cloneRelayRoutes(m.Relay)
+	for index := range routes {
+		if converter, hooks := SplitProviderConverter(routes[index].Converter); hooks {
+			routes[index].Converter = converter
+		}
+	}
+	return &dto.AdvancedCustomConfig{Routes: routes}
+}
+
+// ChannelRelayConfig is RelayConfig for a channel: an upstream_path that
+// starts with {config.<name>} starts with that address of the channel's plugin
+// config instead, or is relative to the channel base URL when the address is
+// empty. config is the config as ChannelConfigFor returns it.
+func (m Meta) ChannelRelayConfig(config []byte) *dto.AdvancedCustomConfig {
+	relay := m.RelayConfig()
+	if relay == nil {
+		return nil
+	}
+	for index, route := range relay.Routes {
+		name, rest, ok := configAddressPath(route.UpstreamPath)
+		if !ok {
+			continue
+		}
+		address := ChannelConfigURL(config, name)
+		if address == "" && rest == "" {
+			rest = "/"
+		}
+		relay.Routes[index].UpstreamPath = address + rest
+	}
+	return relay
+}
+
+// configAddressPath splits an upstream_path of the form {config.<name>}<rest>.
+func configAddressPath(upstreamPath string) (name, rest string, ok bool) {
+	trimmed := strings.TrimSpace(upstreamPath)
+	if !strings.HasPrefix(trimmed, configAddressPrefix) {
+		return "", "", false
+	}
+	name, rest, ok = strings.Cut(trimmed[len(configAddressPrefix):], "}")
+	return name, rest, ok
+}
+
+const configAddressPrefix = "{config."
+
+// RelayRoute returns the relay route serving requestPath for model, with the
+// converter as the manifest declares it.
+func (m Meta) RelayRoute(requestPath, model string) (dto.AdvancedCustomRoute, bool) {
+	config := dto.AdvancedCustomConfig{Routes: m.Relay}
+	return config.MatchPathForModel(requestPath, model)
+}
+
+// RelaysModel reports whether a relay route accepts model for client
+// requests: the plugin serves the model on chat paths, not only as a task. The
+// model list and balance routes accept every model and serve none.
+func (m Meta) RelaysModel(model string) bool {
+	return slices.ContainsFunc(m.Relay, func(route dto.AdvancedCustomRoute) bool {
+		path := strings.TrimSpace(route.IncomingPath)
+		return path != dto.AdvancedCustomModelListPath && path != dto.AdvancedCustomBalancePath && route.AcceptsModel(model)
+	})
+}
+
+// ServesResponsesWebSocket reports whether a Responses WebSocket session for
+// model may run on the relay routes: the /v1/responses route serving it has no
+// converter, so the session forwards native events as Advanced Custom does.
+// An empty model asks whether any route of that path qualifies.
+func (m Meta) ServesResponsesWebSocket(model string) bool {
+	if model == "" {
+		return slices.ContainsFunc(m.Relay, func(route dto.AdvancedCustomRoute) bool {
+			config := dto.AdvancedCustomConfig{Routes: []dto.AdvancedCustomRoute{route}}
+			_, ok := config.MatchPath(responsesPath)
+			return ok && route.IsNative()
+		})
+	}
+	route, ok := m.RelayRoute(responsesPath, model)
+	return ok && route.IsNative()
+}
+
+const responsesPath = "/v1/responses"
+
+// ModelListRoute returns the /v1/models relay route, with the converter as the
+// manifest declares it.
+func (m Meta) ModelListRoute() (dto.AdvancedCustomRoute, bool) {
+	config := dto.AdvancedCustomConfig{Routes: m.Relay}
+	return config.ModelListRoute()
+}
+
+func cloneRelayRoutes(routes []dto.AdvancedCustomRoute) []dto.AdvancedCustomRoute {
+	if routes == nil {
+		return nil
+	}
+	cloned := make([]dto.AdvancedCustomRoute, len(routes))
+	for index, route := range routes {
+		route.Models = slices.Clone(route.Models)
+		if route.Auth != nil {
+			auth := *route.Auth
+			route.Auth = &auth
+		}
+		cloned[index] = route
+	}
+	return cloned
+}
+
+// Upstream kinds a plugin driver can address. Every driver speaks to its
+// vendor; a driver that also builds its own native-route URLs when the channel
+// points at another New API gateway declares UpstreamKindNewAPI in
+// meta.upstreams, which is what makes it bindable to a type-60 channel.
+const (
+	UpstreamKindVendor = "vendor"
+	UpstreamKindNewAPI = "new_api"
+)
+
+// SupportsUpstream reports whether the driver handles channels of the given
+// upstream kind. The vendor kind is implied for every plugin.
+func (m Meta) SupportsUpstream(kind string) bool {
+	return kind == UpstreamKindVendor || slices.Contains(m.Upstreams, kind)
+}
+
+// PreservesJSONOrder reports whether the plugin declared json-order@1: its
+// hooks receive JSON request bodies with members in the order the client sent
+// them, and its JSON request bodies go upstream as JSON.stringify writes them.
+// Other plugins keep the cheaper Go-map path, whose members enumerate sorted.
+func (m Meta) PreservesJSONOrder() bool {
+	return slices.Contains(m.RequiredCapabilities, CapabilityJSONOrder)
+}
+
+// JSONTextMember names the member of a hook result (a decoded requestBody, a
+// request descriptor's body) that the host also takes as JSON text, for a
+// plugin that preserves JSON order; it is empty for other plugins.
+func (m Meta) JSONTextMember(member string) string {
+	if !m.PreservesJSONOrder() {
+		return ""
+	}
+	return member
+}
+
+// UsageProfile replaces the plugin's default usage metadata for its models.
+type UsageProfile struct {
+	Models   []string                    `json:"models"`
+	Schema   map[string]UsageFieldSchema `json:"schema"`
+	Examples []UsageExample              `json:"examples,omitempty"`
+}
+
+// UsageForModel returns read-only usage metadata for a declared model. Aliases
+// must be resolved by the host first; an unknown or ambiguous model uses the
+// plugin defaults. Profile examples never inherit the default examples.
+func (m Meta) UsageForModel(model string) (map[string]UsageFieldSchema, []UsageExample) {
+	return m.UsageForModels(model)
+}
+
+// UsageForModels returns the usage metadata of the first candidate that a
+// profile declares. Runtime callers pass the final upstream model before the
+// client-facing model, so a channel mapping that sends a declared model to a
+// vendor endpoint ID keeps the declared model's profile. When no candidate is
+// profiled, the plugin defaults apply.
+func (m Meta) UsageForModels(models ...string) (map[string]UsageFieldSchema, []UsageExample) {
+	for _, model := range models {
+		folded := asciiFold(model)
+		for _, profile := range m.UsageProfiles {
+			for _, declared := range profile.Models {
+				if asciiFold(declared) == folded {
+					return profile.Schema, profile.Examples
+				}
+			}
+		}
+	}
+	return m.UsageSchema, m.UsageExamples
 }
 
 // ProtocolSupports reports whether the named protocol claim includes mode.
@@ -132,6 +380,7 @@ type AuthMeta struct {
 type UsageFieldSchema struct {
 	Type        string                   `json:"type,omitempty"`
 	Unit        string                   `json:"unit,omitempty"`
+	UnitLabel   LocalizedText            `json:"unitLabel,omitempty"`
 	Enum        []string                 `json:"enum,omitempty"`
 	Description LocalizedText            `json:"description,omitempty"`
 	EnumLabels  map[string]LocalizedText `json:"enumLabels,omitempty"`
@@ -140,6 +389,15 @@ type UsageFieldSchema struct {
 type LoadedPlugin struct {
 	Meta   Meta
 	Engine *Engine
+}
+
+// UsesSubmitEventDelta reports whether SSE submissions go through
+// parseSubmitEventDelta: the plugin declares submit-sse-delta@1, or exports
+// parseSubmitEventDelta without parseSubmitEvent. A plugin that exports both
+// and declares nothing keeps the snapshot hook, as before.
+func UsesSubmitEventDelta(meta Meta, engine *Engine) bool {
+	return slices.Contains(meta.RequiredCapabilities, CapabilitySubmitSSEDelta) ||
+		engine.HasExport("parseSubmitEventDelta") && !engine.HasExport("parseSubmitEvent")
 }
 
 // RegistrySnapshot is a read-only copy of the metadata currently stored in
@@ -178,10 +436,13 @@ type Registry struct {
 	disabledFactory map[string]struct{}
 	masterEnabled   atomic.Bool
 	generation      atomic.Pointer[RoutingGeneration]
-	preparer        RoutingGenerationPreparer
-	routingErrors   map[string]string
-	lastRebuildErr  string
-	lastRebuild     RoutingRebuildOutcome
+	// switchedOff are, with the master switch off, the enabled plugins it
+	// leaves out of the published generation; nil with the switch on.
+	switchedOff    atomic.Pointer[map[string]*LoadedPlugin]
+	preparer       RoutingGenerationPreparer
+	routingErrors  map[string]string
+	lastRebuildErr string
+	lastRebuild    RoutingRebuildOutcome
 }
 
 func NewRegistry() *Registry {
@@ -250,24 +511,106 @@ func CompilePlugin(source string, options Options) (*LoadedPlugin, error) {
 	if err != nil {
 		return nil, err
 	}
-	value, err := engine.Export(context.Background(), "meta")
+	value, members, err := engine.exportWithMemberJSON(context.Background(), "meta", "configSchema", "samples", "channelConfig")
 	if err != nil {
 		return nil, err
 	}
+	configSchema, samples, channelConfig := members[0], members[1], members[2]
 	meta, err := decodeMeta(value)
 	if err != nil {
 		return nil, err
+	}
+	for _, stage := range append(slices.Clone(TransformStages), ReplyHook, ReportHook) {
+		if !engine.HasExport(stage) {
+			continue
+		}
+		callable, callableErr := engine.HasCallablePath(context.Background(), stage)
+		if callableErr != nil {
+			return nil, callableErr
+		}
+		if !callable {
+			return nil, fmt.Errorf("plugin %s export %q is not a function", meta.Key, stage)
+		}
+		meta.transformHooks = append(meta.transformHooks, stage)
+	}
+	if configSchema != nil {
+		if !meta.HasTransformPart() {
+			return nil, fmt.Errorf("plugin %s meta configSchema belongs to the request processing part; export ingress, request, outbound, egress, reply or report, or remove it", meta.Key)
+		}
+		if meta.ConfigSchema, err = decodeConfigSchema(configSchema); err != nil {
+			return nil, err
+		}
+	}
+	if samples != nil {
+		if !meta.HasTransformPart() {
+			return nil, fmt.Errorf("plugin %s meta samples belongs to the request processing part; export ingress, request, outbound, egress, reply or report, or remove it", meta.Key)
+		}
+		if meta.Samples, err = decodeSamples(samples); err != nil {
+			return nil, err
+		}
+	}
+	if _, present := value.(map[string]any)["optional"]; present && !meta.HasTransformPart() {
+		return nil, fmt.Errorf("plugin %s meta optional belongs to the request processing part; export ingress, request, outbound, egress, reply or report, or remove it", meta.Key)
+	}
+	if engine.HasExport("validateConfig") {
+		if !meta.HasTransformPart() {
+			return nil, fmt.Errorf("plugin %s export validateConfig belongs to the request processing part; export ingress, request, outbound, egress, reply or report, or remove it", meta.Key)
+		}
+		callable, callableErr := engine.HasCallablePath(context.Background(), "validateConfig")
+		if callableErr != nil {
+			return nil, callableErr
+		}
+		if !callable {
+			return nil, fmt.Errorf("plugin %s export %q is not a function", meta.Key, "validateConfig")
+		}
+	}
+	if !engine.HasExport("buildSubmitRequest") {
+		if len(meta.Relay) == 0 && !meta.HasTransformPart() {
+			return nil, fmt.Errorf("plugin %s has no task part (export buildSubmitRequest), provider part (meta.relay) or request processing part (export ingress, request, outbound, egress, reply or report)", meta.Key)
+		}
+		object, _ := value.(map[string]any)
+		for _, field := range taskOnlyMetaFields {
+			if _, present := object[field]; present {
+				return nil, fmt.Errorf("plugin %s meta %s belongs to the task part; export buildSubmitRequest or remove it", meta.Key, field)
+			}
+		}
+		meta.noTaskPart = true
+	}
+	if channelConfig != nil {
+		if meta.ChannelConfig, err = decodeChannelConfigSchema(channelConfig); err != nil {
+			return nil, err
+		}
+	}
+	if meta.noTaskPart && len(meta.Relay) == 0 {
+		for _, field := range []string{"channelConfig", "keyHint"} {
+			if _, present := value.(map[string]any)[field]; present {
+				return nil, fmt.Errorf("plugin %s meta %s belongs to a channel; export buildSubmitRequest or declare meta.relay, or remove it", meta.Key, field)
+			}
+		}
+	}
+	if engine.HasExport("buildBalanceRequest") != engine.HasExport("parseBalance") {
+		return nil, fmt.Errorf("plugin %s must export both buildBalanceRequest and parseBalance, or neither", meta.Key)
 	}
 	if err = normalizeV1Meta(&meta); err != nil {
 		return nil, err
 	}
 	engine.key = meta.Key
 	engine.version = meta.Version
-	requiredHooks := []string{"buildSubmitRequest", "parseSubmitResponse", "parseTaskResult"}
-	if meta.FetchMode == "batch" {
-		requiredHooks = append(requiredHooks, "buildBatchQueryRequest", "parseBatchResult")
-	} else {
-		requiredHooks = append(requiredHooks, "buildQueryRequest")
+	var requiredHooks []string
+	if meta.HasTaskPart() {
+		requiredHooks = []string{"buildSubmitRequest", "parseSubmitResponse", "parseTaskResult"}
+		if slices.Contains(meta.SubmitResponseTypes, "sse") {
+			if UsesSubmitEventDelta(meta, engine) {
+				requiredHooks = append(requiredHooks, "parseSubmitEventDelta")
+			} else {
+				requiredHooks = append(requiredHooks, "parseSubmitEvent")
+			}
+		}
+		if meta.FetchMode == "batch" {
+			requiredHooks = append(requiredHooks, "buildBatchQueryRequest", "parseBatchResult")
+		} else {
+			requiredHooks = append(requiredHooks, "buildQueryRequest")
+		}
 	}
 	for _, hook := range requiredHooks {
 		has, hasErr := engine.HasCallablePath(context.Background(), hook)
@@ -280,11 +623,7 @@ func CompilePlugin(source string, options Options) (*LoadedPlugin, error) {
 	}
 	artifactHooks := make(map[string]bool, 2)
 	for _, hook := range []string{"listArtifacts", "buildContentRequest"} {
-		exported, exportErr := engine.HasExport(context.Background(), hook)
-		if exportErr != nil {
-			return nil, exportErr
-		}
-		if !exported {
+		if !engine.HasExport(hook) {
 			continue
 		}
 		callable, callableErr := engine.HasCallablePath(context.Background(), hook)
@@ -432,19 +771,90 @@ func CompilePlugin(source string, options Options) (*LoadedPlugin, error) {
 		}
 	}
 	for _, removed := range []string{"resolveRequest", "renderError", "renderers"} {
-		has, e := engine.HasExport(context.Background(), removed)
-		if e != nil {
-			return nil, e
-		}
-		if has {
+		if engine.HasExport(removed) {
 			return nil, fmt.Errorf("plugin %s export %q is no longer supported", meta.Key, removed)
 		}
+	}
+	if err = validateProviderHooks(meta, engine); err != nil {
+		return nil, err
 	}
 	return &LoadedPlugin{Meta: meta, Engine: engine}, nil
 }
 
+// taskOnlyMetaFields are the manifest fields only a task part reads.
+var taskOnlyMetaFields = []string{"routes", "protocols", "fetchMode", "submitResponseTypes", "usageSchema", "usageExamples", "usageProfiles", "auth", "channelTypes", "upstreams"}
+
+// ProviderHooks are the optional credential, relay and channel exports of a
+// plugin.
+var ProviderHooks = []string{"login", "refresh", "revoke", "signRequest", "prepareRequest", "credentialRejected", "convertRequest", "convertResponse", "convertStreamEvent", "exchangeKey", "checkKey", "buildBalanceRequest", "parseBalance", "scheduled"}
+
+var providerConvertHooks = []string{"convertRequest", "convertResponse", "convertStreamEvent"}
+
+// relayOnlyHooks act on relay requests, so only a plugin with meta.relay may
+// export them. The credential hooks serve the task part as well.
+var relayOnlyHooks = []string{"prepareRequest", "credentialRejected", "convertRequest", "convertResponse", "convertStreamEvent"}
+
+func validateProviderHooks(meta Meta, engine *Engine) error {
+	exported := make(map[string]bool, len(ProviderHooks))
+	for _, hook := range ProviderHooks {
+		if !engine.HasExport(hook) {
+			continue
+		}
+		callable, err := engine.HasCallablePath(context.Background(), hook)
+		if err != nil {
+			return err
+		}
+		if !callable {
+			return fmt.Errorf("plugin %s export %q is not a function", meta.Key, hook)
+		}
+		if !meta.HasProviderPart() && slices.Contains(relayOnlyHooks, hook) {
+			return fmt.Errorf("plugin %s exports %s, which needs meta.relay routes", meta.Key, hook)
+		}
+		if !meta.HasProviderPart() && !meta.HasTaskPart() {
+			return fmt.Errorf("plugin %s exports %s, which needs a task part or meta.relay routes", meta.Key, hook)
+		}
+		exported[hook] = true
+	}
+	// The model list route only reads a reply, so it needs convertResponse
+	// alone; every other plugin-converter route needs all three.
+	usesConverter, relaysConverter := false, false
+	for _, route := range meta.Relay {
+		if _, hooks := SplitProviderConverter(route.Converter); hooks {
+			usesConverter = true
+			relaysConverter = relaysConverter || strings.TrimSpace(route.IncomingPath) != dto.AdvancedCustomModelListPath
+		}
+	}
+	for _, hook := range providerConvertHooks {
+		needed := relaysConverter || (usesConverter && hook == "convertResponse")
+		if needed && !exported[hook] {
+			return fmt.Errorf("plugin %s relay routes use converter %q but the plugin does not export %s", meta.Key, ProviderConverter, hook)
+		}
+		if !needed && exported[hook] {
+			return fmt.Errorf("plugin %s exports %s but no relay route that calls it uses converter %q", meta.Key, hook, ProviderConverter)
+		}
+	}
+	return nil
+}
+
 func (r *Registry) Get(platform string) (*LoadedPlugin, bool) {
 	return r.Generation().Get(platform)
+}
+
+// GetIgnoringMasterSwitch returns the plugin of key as Get does, and with
+// the master switch off, the enabled plugin the switch leaves out. Request
+// processing looks plugins up with it: the master switch covers task and
+// provider plugin channels only, while a plugin switched off on its own stays
+// off.
+func (r *Registry) GetIgnoringMasterSwitch(key string) (*LoadedPlugin, bool) {
+	if plugin, ok := r.Get(key); ok {
+		return plugin, true
+	}
+	switchedOff := r.switchedOff.Load()
+	if switchedOff == nil {
+		return nil, false
+	}
+	plugin, ok := (*switchedOff)[key]
+	return plugin, ok
 }
 
 func (r *Registry) GetByChannelType(channelType int) (*LoadedPlugin, bool) {
@@ -452,7 +862,8 @@ func (r *Registry) GetByChannelType(channelType int) (*LoadedPlugin, bool) {
 }
 
 // Enabled reports the master switch position. When false the published
-// routing generation contains no plugins regardless of the other layers.
+// routing generation contains no plugins regardless of the other layers;
+// GetIgnoringMasterSwitch still finds the enabled ones.
 func (r *Registry) Enabled() bool {
 	return r.masterEnabled.Load()
 }
@@ -654,6 +1065,12 @@ func (r *Registry) prepareGeneration(
 	if err != nil {
 		return nil, nil, err
 	}
+	// The preparer decides admission by whether a key is built in, which the
+	// filtered factory passed here no longer tells for a switched-off key.
+	generation.factoryKeys = pluginMapKeys(r.factory)
+	for key := range factory {
+		generation.factoryKeys[key] = struct{}{}
+	}
 	if r.preparer != nil {
 		prepared, prepareErr := r.preparer(generation, current)
 		if prepareErr != nil {
@@ -683,6 +1100,13 @@ func (r *Registry) publishGeneration(
 	}
 	r.routingErrors = routingErrors
 	r.activeOverride = activeOverride
+	// Every caller updated the layers before publishing.
+	var switchedOff *map[string]*LoadedPlugin
+	if !r.masterEnabled.Load() {
+		plugins := effectivePlugins(filterDisabledFactory(r.factory, r.disabledFactory), r.override)
+		switchedOff = &plugins
+	}
+	r.switchedOff.Store(switchedOff)
 	r.lastRebuildErr = ""
 	status := "success"
 	if len(routingErrors) > 0 {
@@ -791,9 +1215,12 @@ func (r *Registry) Snapshot() RegistrySnapshot {
 }
 
 func cloneMeta(meta Meta) Meta {
+	meta.SubmitResponseTypes = slices.Clone(meta.SubmitResponseTypes)
+	meta.RequiredCapabilities = slices.Clone(meta.RequiredCapabilities)
 	meta.ChannelTypes = append([]int(nil), meta.ChannelTypes...)
 	meta.Models = append([]string(nil), meta.Models...)
 	meta.AllowedHosts = append([]string(nil), meta.AllowedHosts...)
+	meta.Upstreams = slices.Clone(meta.Upstreams)
 	meta.Routes = append([]Route(nil), meta.Routes...)
 	for index := range meta.Routes {
 		meta.Routes[index].Models = append([]string(nil), meta.Routes[index].Models...)
@@ -806,31 +1233,58 @@ func cloneMeta(meta Meta) Meta {
 	if meta.Description != nil {
 		meta.Description = maps.Clone(meta.Description)
 	}
-	if meta.UsageSchema != nil {
-		usageSchema := make(map[string]UsageFieldSchema, len(meta.UsageSchema))
-		for key, field := range meta.UsageSchema {
-			if field.Enum != nil {
-				field.Enum = append([]string{}, field.Enum...)
-			}
-			if field.Description != nil {
-				field.Description = maps.Clone(field.Description)
-			}
-			if field.EnumLabels != nil {
-				labels := make(map[string]LocalizedText, len(field.EnumLabels))
-				for value, label := range field.EnumLabels {
-					labels[value] = maps.Clone(label)
-				}
-				field.EnumLabels = labels
-			}
-			usageSchema[key] = field
-		}
-		meta.UsageSchema = usageSchema
+	if meta.NameI18n != nil {
+		meta.NameI18n = maps.Clone(meta.NameI18n)
 	}
-	meta.UsageExamples = cloneUsageExamples(meta.UsageExamples)
+	if meta.KeyHint != nil {
+		meta.KeyHint = maps.Clone(meta.KeyHint)
+	}
+	meta.UsageSchema = CloneUsageSchema(meta.UsageSchema)
+	meta.UsageExamples = CloneUsageExamples(meta.UsageExamples)
+	meta.UsageProfiles = append([]UsageProfile(nil), meta.UsageProfiles...)
+	for index := range meta.UsageProfiles {
+		profile := &meta.UsageProfiles[index]
+		profile.Models = append([]string(nil), profile.Models...)
+		profile.Schema = CloneUsageSchema(profile.Schema)
+		profile.Examples = CloneUsageExamples(profile.Examples)
+	}
+	meta.Relay = cloneRelayRoutes(meta.Relay)
+	meta.transformHooks = slices.Clone(meta.transformHooks)
+	meta.Samples = slices.Clone(meta.Samples)
+	for index := range meta.Samples {
+		meta.Samples[index].Name = maps.Clone(meta.Samples[index].Name)
+	}
 	return meta
 }
 
-func cloneUsageExamples(examples []UsageExample) []UsageExample {
+// CloneUsageSchema copies schema fields and localized metadata for independent readers.
+func CloneUsageSchema(schema map[string]UsageFieldSchema) map[string]UsageFieldSchema {
+	if schema == nil {
+		return nil
+	}
+	cloned := make(map[string]UsageFieldSchema, len(schema))
+	for key, field := range schema {
+		if field.Enum != nil {
+			field.Enum = append([]string{}, field.Enum...)
+		}
+		if field.Description != nil {
+			field.Description = maps.Clone(field.Description)
+		}
+		field.UnitLabel = maps.Clone(field.UnitLabel)
+		if field.EnumLabels != nil {
+			labels := make(map[string]LocalizedText, len(field.EnumLabels))
+			for value, label := range field.EnumLabels {
+				labels[value] = maps.Clone(label)
+			}
+			field.EnumLabels = labels
+		}
+		cloned[key] = field
+	}
+	return cloned
+}
+
+// CloneUsageExamples copies example facts for independent readers.
+func CloneUsageExamples(examples []UsageExample) []UsageExample {
 	if examples == nil {
 		return nil
 	}
@@ -904,6 +1358,15 @@ func (r *Registry) resolveActiveOverrides(
 	return active
 }
 
+// UnknownMetaFieldError identifies a manifest field unsupported by this host.
+type UnknownMetaFieldError struct {
+	Field string
+}
+
+func (e *UnknownMetaFieldError) Error() string {
+	return fmt.Sprintf("plugin meta has unknown field %q", e.Field)
+}
+
 func decodeMeta(value any) (Meta, error) {
 	object, ok := value.(map[string]any)
 	if !ok {
@@ -911,9 +1374,9 @@ func decodeMeta(value any) (Meta, error) {
 	}
 	for field := range object {
 		switch field {
-		case "sortPriority", "website", "apiVersion", "key", "name", "icon", "description", "version", "author", "baseUrl", "channelTypes", "channelType", "compatibleChannelTypes", "models", "fetchMode", "allowedHosts", "routes", "protocols", "usageSchema", "usageExamples", "auth", "endpoints", "submitPaths", "actions":
+		case "requiredCapabilities", "submitResponseTypes", "sortPriority", "website", "apiVersion", "key", "name", "icon", "description", "version", "author", "baseUrl", "channelTypes", "channelType", "compatibleChannelTypes", "models", "fetchMode", "allowedHosts", "upstreams", "routes", "protocols", "usageSchema", "usageExamples", "usageProfiles", "auth", "endpoints", "submitPaths", "actions", "relay", "configSchema", "optional", "samples", "channelConfig", "keyHint":
 		default:
-			return Meta{}, fmt.Errorf("plugin meta has unknown field %q", field)
+			return Meta{}, &UnknownMetaFieldError{Field: field}
 		}
 	}
 	meta := Meta{}
@@ -925,7 +1388,12 @@ func decodeMeta(value any) (Meta, error) {
 	if meta.Key, err = stringMetaField(object, "key"); err != nil {
 		return Meta{}, err
 	}
-	if meta.Name, err = stringMetaField(object, "name"); err != nil {
+	if _, localized := object["name"].(map[string]any); localized {
+		if meta.NameI18n, err = localizedTextMetaField(object, "name", maxMetaNameRunes); err != nil {
+			return Meta{}, err
+		}
+		meta.Name = meta.NameI18n["en"]
+	} else if meta.Name, err = stringMetaField(object, "name"); err != nil {
 		return Meta{}, err
 	}
 	if meta.Icon, err = stringMetaField(object, "icon"); err != nil {
@@ -939,6 +1407,9 @@ func decodeMeta(value any) (Meta, error) {
 	}
 	meta.Icon = strings.TrimSpace(meta.Icon)
 	if meta.Description, err = localizedTextMetaField(object, "description", maxMetaDescriptionRunes); err != nil {
+		return Meta{}, err
+	}
+	if meta.KeyHint, err = localizedTextMetaField(object, "keyHint", maxMetaKeyHintRunes); err != nil {
 		return Meta{}, err
 	}
 	if meta.Version, err = stringMetaField(object, "version"); err != nil {
@@ -978,11 +1449,36 @@ func decodeMeta(value any) (Meta, error) {
 	if meta.FetchMode, err = stringMetaField(object, "fetchMode"); err != nil {
 		return Meta{}, err
 	}
+	meta.SubmitResponseTypes = []string{"json"}
+	if _, present := object["submitResponseTypes"]; present {
+		meta.SubmitResponseTypes, err = strictStringSlice(object, "submitResponseTypes")
+		if err != nil {
+			return Meta{}, err
+		}
+		if len(meta.SubmitResponseTypes) == 0 {
+			return Meta{}, fmt.Errorf("submitResponseTypes must not be empty")
+		}
+		seen := make(map[string]bool)
+		for _, kind := range meta.SubmitResponseTypes {
+			if (kind != "json" && kind != "sse") || seen[kind] {
+				return Meta{}, fmt.Errorf("invalid or duplicate submitResponseTypes value %q", kind)
+			}
+			seen[kind] = true
+		}
+	}
+	meta.RequiredCapabilities, err = strictStringSlice(object, "requiredCapabilities")
+	if err != nil {
+		return Meta{}, err
+	}
 	meta.Models, err = strictStringSlice(object, "models")
 	if err != nil {
 		return Meta{}, err
 	}
 	meta.AllowedHosts, err = strictStringSlice(object, "allowedHosts")
+	if err != nil {
+		return Meta{}, err
+	}
+	meta.Upstreams, err = strictStringSlice(object, "upstreams")
 	if err != nil {
 		return Meta{}, err
 	}
@@ -1009,9 +1505,26 @@ func decodeMeta(value any) (Meta, error) {
 			return Meta{}, err
 		}
 	}
+	if usageProfiles, exists := object["usageProfiles"]; exists {
+		meta.UsageProfiles, err = decodeUsageProfiles(usageProfiles)
+		if err != nil {
+			return Meta{}, err
+		}
+	}
 	for _, removedField := range []string{"submitPaths", "actions"} {
 		if _, exists := object[removedField]; exists {
 			return Meta{}, fmt.Errorf("plugin meta %s is no longer supported; declare routes instead", removedField)
+		}
+	}
+	if relay, exists := object["relay"]; exists {
+		meta.Relay, err = decodeRelayRoutes(relay)
+		if err != nil {
+			return Meta{}, err
+		}
+	}
+	if value, exists := object["optional"]; exists {
+		if meta.Optional, ok = value.(bool); !ok {
+			return Meta{}, fmt.Errorf("plugin meta optional must be a boolean")
 		}
 	}
 	switch auth := object["auth"].(type) {
@@ -1058,6 +1571,23 @@ func ValidateV1Meta(meta Meta) error {
 }
 
 func normalizeV1Meta(meta *Meta) error {
+	seenCapabilities := make(map[string]bool, len(meta.RequiredCapabilities))
+	for _, name := range meta.RequiredCapabilities {
+		if !HasCapability(name) || seenCapabilities[name] {
+			return fmt.Errorf("unsupported or duplicate required capability %q", name)
+		}
+		if name == CapabilitySubmitSSEDelta && !slices.Contains(meta.SubmitResponseTypes, "sse") {
+			return fmt.Errorf("%s requires submitResponseTypes to include sse", name)
+		}
+		seenCapabilities[name] = true
+	}
+	seenUpstreams := make(map[string]bool, len(meta.Upstreams))
+	for _, kind := range meta.Upstreams {
+		if (kind != UpstreamKindVendor && kind != UpstreamKindNewAPI) || seenUpstreams[kind] {
+			return fmt.Errorf("unsupported or duplicate upstream kind %q", kind)
+		}
+		seenUpstreams[kind] = true
+	}
 	if meta.SortPriority < math.MinInt32 || meta.SortPriority > math.MaxInt32 {
 		return fmt.Errorf("plugin meta sortPriority must be a signed 32-bit integer")
 	}
@@ -1110,6 +1640,11 @@ func normalizeV1Meta(meta *Meta) error {
 			}
 		}
 	}
+	if meta.NameI18n != nil {
+		if err := validateLocalizedText(meta.NameI18n, "name", maxMetaNameRunes); err != nil {
+			return err
+		}
+	}
 	if err := validateLocalizedText(meta.Description, "description", maxMetaDescriptionRunes); err != nil {
 		return err
 	}
@@ -1132,20 +1667,30 @@ func normalizeV1Meta(meta *Meta) error {
 		}
 		meta.BaseURL = normalized
 	}
-	if !pluginKeyPattern.MatchString(meta.Key) {
-		return fmt.Errorf("plugin meta key must match %s", pluginKeyPattern)
-	}
 	if len(meta.Key) > 30 {
 		return fmt.Errorf("plugin meta key must not exceed 30 characters")
+	}
+	if !ValidPluginKey(meta.Key) {
+		return fmt.Errorf("plugin meta key must match %s", pluginKeyPattern)
+	}
+	// The host serves the plugin's routes under /{key}, so the key must not
+	// name a host namespace.
+	if meta.Key == "api" || slices.ContainsFunc(reservedRouteNamespaces, func(namespace string) bool {
+		first, _, _ := strings.Cut(strings.TrimPrefix(namespace, "/"), "/")
+		return first == meta.Key
+	}) {
+		return fmt.Errorf("plugin meta key %q is a reserved path segment", meta.Key)
 	}
 	if !pluginVersionPattern.MatchString(meta.Version) {
 		return fmt.Errorf("plugin meta version must be semver")
 	}
-	if meta.FetchMode != "per_task" && meta.FetchMode != "batch" {
-		return fmt.Errorf("plugin meta fetchMode must be per_task or batch")
-	}
-	if len(meta.Models) == 0 {
-		return fmt.Errorf("plugin meta models must contain at least one model")
+	if meta.HasTaskPart() {
+		if meta.FetchMode != "per_task" && meta.FetchMode != "batch" {
+			return fmt.Errorf("plugin meta fetchMode must be per_task or batch")
+		}
+		if len(meta.Models) == 0 {
+			return fmt.Errorf("plugin meta models must contain at least one model")
+		}
 	}
 	seenChannelTypes := make(map[int]struct{}, len(meta.ChannelTypes))
 	for _, channelType := range meta.ChannelTypes {
@@ -1154,6 +1699,9 @@ func normalizeV1Meta(meta *Meta) error {
 		}
 		if channelType == constant.ChannelTypeTaskPlugin {
 			return fmt.Errorf("plugin meta channelTypes must not contain the task plugin channel type")
+		}
+		if channelType == constant.ChannelTypeNewAPI {
+			return fmt.Errorf("plugin meta channelTypes must not contain the New API channel type; bind the plugin through task_extend_plugin_keys instead")
 		}
 		if _, duplicate := seenChannelTypes[channelType]; duplicate {
 			return fmt.Errorf("plugin meta channelTypes must be unique")
@@ -1258,7 +1806,141 @@ func normalizeV1Meta(meta *Meta) error {
 			}
 		}
 	}
-	for name, field := range meta.UsageSchema {
+	if err := validateUsageSchema(meta.UsageSchema); err != nil {
+		return err
+	}
+	if err := validateUsageExamples(meta.UsageSchema, meta.UsageExamples); err != nil {
+		return err
+	}
+	profileModels := make(map[string]struct{})
+	for index, profile := range meta.UsageProfiles {
+		if len(profile.Models) == 0 {
+			return fmt.Errorf("plugin meta usageProfiles[%d] models must contain at least one model", index)
+		}
+		if err := validateModelScope(profile.Models, fmt.Sprintf("usageProfiles[%d]", index)); err != nil {
+			return err
+		}
+		for _, model := range profile.Models {
+			if _, exists := models[model]; !exists {
+				return fmt.Errorf("plugin meta usageProfiles[%d] model %q is not declared in plugin meta models", index, model)
+			}
+			if _, duplicate := profileModels[model]; duplicate {
+				return fmt.Errorf("plugin meta usageProfiles model %q belongs to multiple profiles", model)
+			}
+			profileModels[model] = struct{}{}
+		}
+		if profile.Schema == nil {
+			return fmt.Errorf("plugin meta usageProfiles[%d] schema must be an object", index)
+		}
+		if err := validateUsageSchema(profile.Schema); err != nil {
+			return fmt.Errorf("plugin meta usageProfiles[%d]: %w", index, err)
+		}
+		if err := validateUsageExamples(profile.Schema, profile.Examples); err != nil {
+			return fmt.Errorf("plugin meta usageProfiles[%d]: %w", index, err)
+		}
+	}
+	return validateRelayRoutes(meta.Relay, meta.ChannelConfig)
+}
+
+// relayErrorNames renames Advanced Custom validation errors for manifests.
+var relayErrorNames = strings.NewReplacer("advanced_custom.advanced_routes", "plugin meta relay", "advanced_routes[", "relay[")
+
+var relayRouteFields = []string{"incoming_path", "upstream_path", "converter", "models", "auth", "pass_through_body_enabled"}
+
+// decodeRelayRoutes reads meta.relay. Each route has exactly the keys of an
+// Advanced Custom route.
+func decodeRelayRoutes(value any) ([]dto.AdvancedCustomRoute, error) {
+	items, ok := value.([]any)
+	if !ok {
+		return nil, fmt.Errorf("plugin meta relay must be an array")
+	}
+	routes := make([]dto.AdvancedCustomRoute, len(items))
+	for index, item := range items {
+		object, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("plugin meta relay[%d] must be an object", index)
+		}
+		for field, fieldValue := range object {
+			if !slices.Contains(relayRouteFields, field) {
+				return nil, fmt.Errorf("plugin meta relay[%d] has unknown field %q", index, field)
+			}
+			if field != "auth" || fieldValue == nil {
+				continue
+			}
+			auth, isObject := fieldValue.(map[string]any)
+			if !isObject {
+				return nil, fmt.Errorf("plugin meta relay[%d].auth must be an object", index)
+			}
+			for authField := range auth {
+				if authField != "type" && authField != "name" && authField != "value" {
+					return nil, fmt.Errorf("plugin meta relay[%d].auth has unknown field %q", index, authField)
+				}
+			}
+		}
+		encoded, err := common.Marshal(object)
+		if err != nil {
+			return nil, fmt.Errorf("plugin meta relay[%d]: %w", index, err)
+		}
+		if err = common.Unmarshal(encoded, &routes[index]); err != nil {
+			return nil, fmt.Errorf("plugin meta relay[%d] has a member of the wrong type: %w", index, err)
+		}
+	}
+	return routes, nil
+}
+
+// validateRelayRoutes applies the Advanced Custom route rules to meta.relay.
+// A plugin-converter route is checked as a native route of its client
+// endpoint, which must be one the plugin can convert, and a chained one as a
+// route of its registered converter. An upstream_path that
+// starts with {config.<name>} must name a url property of channelConfig and go
+// on with nothing or a path; it is checked as a full URL.
+func validateRelayRoutes(routes []dto.AdvancedCustomRoute, channelConfig *ConfigSchema) error {
+	if len(routes) == 0 {
+		return nil
+	}
+	config := dto.AdvancedCustomConfig{Routes: make([]dto.AdvancedCustomRoute, len(routes))}
+	for index, route := range routes {
+		if name, rest, ok := configAddressPath(route.UpstreamPath); ok || strings.HasPrefix(strings.TrimSpace(route.UpstreamPath), configAddressPrefix) {
+			if !ok || !channelConfig.hasAddress(name) || (rest != "" && !strings.HasPrefix(rest, "/")) {
+				return fmt.Errorf("plugin meta relay[%d].upstream_path must start with {config.<name>} naming a format url property of meta.channelConfig, followed by nothing or a path", index)
+			}
+			route.UpstreamPath = "https://config.invalid" + rest
+		}
+		if converter, hooks := SplitProviderConverter(route.Converter); hooks {
+			if !providerConverterPath(route) {
+				return fmt.Errorf("plugin meta relay[%d].converter %q does not support incoming_path %s", index, strings.TrimSpace(route.Converter), route.IncomingPath)
+			}
+			if route.PassThroughBodyEnabled {
+				return fmt.Errorf("plugin meta relay[%d].pass_through_body_enabled requires converter none: %s", index, strings.TrimSpace(route.Converter))
+			}
+			if strings.TrimSpace(route.Converter) != ProviderConverter && (converter == "" || converter == "none" || converter == ProviderConverter) {
+				return fmt.Errorf("plugin meta relay[%d].converter %q must chain a registered converter other than none", index, strings.TrimSpace(route.Converter))
+			}
+			route.Converter = converter
+		}
+		config.Routes[index] = route
+	}
+	if err := config.Validate(); err != nil {
+		return errors.New(relayErrorNames.Replace(err.Error()))
+	}
+	return nil
+}
+
+// providerConverterPath reports whether the convert hooks can serve the client
+// endpoint of route: every relayed one but realtime, which is a WebSocket
+// session, and the model list, whose reply convertResponse converts. The
+// balance path is a channel management request with no hook.
+func providerConverterPath(route dto.AdvancedCustomRoute) bool {
+	if strings.TrimSpace(route.IncomingPath) == dto.AdvancedCustomBalancePath {
+		return false
+	}
+	config := dto.AdvancedCustomConfig{Routes: []dto.AdvancedCustomRoute{route}}
+	_, realtime := config.MatchPath("/v1/realtime")
+	return !realtime
+}
+
+func validateUsageSchema(schema map[string]UsageFieldSchema) error {
+	for name, field := range schema {
 		if strings.TrimSpace(name) == "" || strings.TrimSpace(name) != name {
 			return fmt.Errorf("plugin meta usageSchema keys must be non-empty canonical names")
 		}
@@ -1266,10 +1948,43 @@ func normalizeV1Meta(meta *Meta) error {
 			return err
 		}
 	}
-	if err := validateUsageExamples(meta.UsageSchema, meta.UsageExamples); err != nil {
-		return err
-	}
 	return nil
+}
+
+func decodeUsageProfiles(value any) ([]UsageProfile, error) {
+	items, ok := value.([]any)
+	if !ok {
+		return nil, fmt.Errorf("plugin meta usageProfiles must be an array")
+	}
+	profiles := make([]UsageProfile, 0, len(items))
+	for index, item := range items {
+		object, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("plugin meta usageProfiles[%d] must be an object", index)
+		}
+		for key := range object {
+			if key != "models" && key != "schema" && key != "examples" {
+				return nil, fmt.Errorf("plugin meta usageProfiles[%d] has unknown field %q", index, key)
+			}
+		}
+		models, err := strictStringSlice(object, "models")
+		if err != nil {
+			return nil, fmt.Errorf("plugin meta usageProfiles[%d]: %w", index, err)
+		}
+		schema, err := decodeUsageSchema(object["schema"])
+		if err != nil {
+			return nil, fmt.Errorf("plugin meta usageProfiles[%d]: %w", index, err)
+		}
+		profile := UsageProfile{Models: models, Schema: schema}
+		if examples, exists := object["examples"]; exists {
+			profile.Examples, err = decodeUsageExamples(examples)
+			if err != nil {
+				return nil, fmt.Errorf("plugin meta usageProfiles[%d]: %w", index, err)
+			}
+		}
+		profiles = append(profiles, profile)
+	}
+	return profiles, nil
 }
 
 func decodeUsageSchema(value any) (map[string]UsageFieldSchema, error) {
@@ -1288,7 +2003,7 @@ func decodeUsageSchema(value any) (map[string]UsageFieldSchema, error) {
 		}
 		for key := range fieldObject {
 			switch key {
-			case "type", "unit", "enum", "description", "enumLabels":
+			case "type", "unit", "unitLabel", "enum", "description", "enumLabels":
 			default:
 				return nil, fmt.Errorf("plugin meta usageSchema field %q has unknown property %q", name, key)
 			}
@@ -1299,6 +2014,9 @@ func decodeUsageSchema(value any) (map[string]UsageFieldSchema, error) {
 			return nil, err
 		}
 		if field.Unit, err = stringMetaField(fieldObject, "unit"); err != nil {
+			return nil, err
+		}
+		if field.UnitLabel, err = localizedTextMetaField(fieldObject, "unitLabel", maxUsageFieldDescriptionRunes); err != nil {
 			return nil, err
 		}
 		if field.Description, err = localizedTextMetaField(fieldObject, "description", maxUsageFieldDescriptionRunes); err != nil {
@@ -1332,6 +2050,14 @@ func decodeUsageSchema(value any) (map[string]UsageFieldSchema, error) {
 }
 
 func validateUsageFieldSchema(name string, field UsageFieldSchema) error {
+	if field.UnitLabel != nil {
+		if field.Type != "number" || field.Unit != "count" || field.Enum != nil {
+			return fmt.Errorf("plugin meta usageSchema field %q unitLabel requires a number field with count unit", name)
+		}
+		if err := validateLocalizedText(field.UnitLabel, fmt.Sprintf("usageSchema field %q unitLabel", name), maxUsageFieldDescriptionRunes); err != nil {
+			return err
+		}
+	}
 	if err := validateLocalizedText(field.Description, fmt.Sprintf("usageSchema field %q description", name), maxUsageFieldDescriptionRunes); err != nil {
 		return err
 	}
@@ -1542,7 +2268,7 @@ func decodeRoutes(value any) ([]Route, error) {
 		}
 		for key := range object {
 			switch key {
-			case "method", "path", "type", "action", "decode", "render", "taskIdParam", "models":
+			case "method", "path", "type", "action", "decode", "render", "taskIdParam", "models", "retainResult":
 			default:
 				return nil, fmt.Errorf("plugin meta route %d has unknown field %q", index, key)
 			}
@@ -1579,6 +2305,13 @@ func decodeRoutes(value any) ([]Route, error) {
 			if len(route.Models) == 0 {
 				return nil, fmt.Errorf("plugin meta route %d models must contain at least one model", index)
 			}
+		}
+		if value, exists := object["retainResult"]; exists {
+			retain, ok := value.(bool)
+			if !ok {
+				return nil, fmt.Errorf("plugin meta route %d retainResult must be a boolean", index)
+			}
+			route.RetainResult = &retain
 		}
 		routes = append(routes, route)
 	}
@@ -1790,6 +2523,12 @@ func localizedTextMetaField(object map[string]any, name string, maxRunes int) (L
 	if !exists {
 		return nil, nil
 	}
+	return decodeLocalizedText(value, "plugin meta "+name, maxRunes)
+}
+
+// decodeLocalizedText reads a string or locale object as LocalizedText;
+// subject names it in errors.
+func decodeLocalizedText(value any, subject string, maxRunes int) (LocalizedText, error) {
 	var text LocalizedText
 	switch typed := value.(type) {
 	case string:
@@ -1799,51 +2538,55 @@ func localizedTextMetaField(object map[string]any, name string, maxRunes int) (L
 		for locale, raw := range typed {
 			item, ok := raw.(string)
 			if !ok {
-				return nil, fmt.Errorf("plugin meta %s locale %q must be a string", name, locale)
+				return nil, fmt.Errorf("%s locale %q must be a string", subject, locale)
 			}
 			text[locale] = item
 		}
 	default:
-		return nil, fmt.Errorf("plugin meta %s must be a string or object", name)
+		return nil, fmt.Errorf("%s must be a string or object", subject)
 	}
-	if err := validateLocalizedText(text, name, maxRunes); err != nil {
+	if err := validateLocalizedTextNamed(text, subject, maxRunes); err != nil {
 		return nil, err
 	}
 	return text, nil
 }
 
 func validateLocalizedText(text LocalizedText, name string, maxRunes int) error {
+	return validateLocalizedTextNamed(text, "plugin meta "+name, maxRunes)
+}
+
+func validateLocalizedTextNamed(text LocalizedText, subject string, maxRunes int) error {
 	if text == nil {
 		return nil
 	}
 	if len(text) > maxLocalizedTextLocales {
-		return fmt.Errorf("plugin meta %s must not exceed %d locales", name, maxLocalizedTextLocales)
+		return fmt.Errorf("%s must not exceed %d locales", subject, maxLocalizedTextLocales)
 	}
 	canonical := make(map[string]string, len(text))
 	for locale, value := range text {
 		if !localeTagPattern.MatchString(locale) {
-			return fmt.Errorf("plugin meta %s has invalid locale %q", name, locale)
+			return fmt.Errorf("%s has invalid locale %q", subject, locale)
 		}
 		canonicalLocale := canonicalLocaleTag(locale)
 		if _, duplicate := canonical[canonicalLocale]; duplicate {
-			return fmt.Errorf("plugin meta %s has duplicate locale %q", name, canonicalLocale)
+			return fmt.Errorf("%s has duplicate locale %q", subject, canonicalLocale)
 		}
 		trimmed := strings.TrimSpace(value)
 		if trimmed == "" {
-			return fmt.Errorf("plugin meta %s value for %q must be a non-empty string", name, locale)
+			return fmt.Errorf("%s value for %q must be a non-empty string", subject, locale)
 		}
 		for _, character := range trimmed {
 			if unicode.IsControl(character) {
-				return fmt.Errorf("plugin meta %s value for %q must not contain control characters", name, locale)
+				return fmt.Errorf("%s value for %q must not contain control characters", subject, locale)
 			}
 		}
 		if utf8.RuneCountInString(trimmed) > maxRunes {
-			return fmt.Errorf("plugin meta %s must not exceed %d characters", name, maxRunes)
+			return fmt.Errorf("%s must not exceed %d characters", subject, maxRunes)
 		}
 		canonical[canonicalLocale] = trimmed
 	}
 	if strings.TrimSpace(canonical["en"]) == "" {
-		return fmt.Errorf("plugin meta %s must include a non-empty \"en\" value", name)
+		return fmt.Errorf("%s must include a non-empty \"en\" value", subject)
 	}
 	for locale := range text {
 		delete(text, locale)

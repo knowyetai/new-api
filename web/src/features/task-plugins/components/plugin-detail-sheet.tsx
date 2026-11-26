@@ -2,7 +2,6 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { RotateCcw, X } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { toast } from 'sonner'
 
 import { CopyButton } from '@/components/copy-button'
 import { EmptyState } from '@/components/empty-state'
@@ -46,6 +45,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { MODEL_PRICING_ISSUES_QUERY_KEY } from '@/features/system-settings/models/pricing-issues'
 import { handleServerError } from '@/lib/handle-server-error'
 import { resolveLocalizedText } from '@/lib/localized-text'
 
@@ -54,10 +54,15 @@ import {
   getTaskPlugin,
   getTaskPluginVersions,
 } from '../api'
+import { toastPluginChange } from '../lib/plugin-change-toast'
+import { localizedPluginName } from '../lib/plugin-name'
+import { resolvePluginParts } from '../lib/plugin-parts'
 import type { TaskPluginListItem } from '../types'
 import { JavaScriptViewer } from './javascript-viewer'
 import { PluginIcon } from './plugin-icon'
 import { PluginMetadataCard } from './plugin-metadata-card'
+import { PluginModelList } from './plugin-model-list'
+import { PluginPartsBadges } from './plugin-parts-badges'
 import { PluginSandbox } from './plugin-sandbox'
 import { SourceDiff } from './source-diff'
 import { UsageSchemaTable } from './usage-schema-table'
@@ -104,17 +109,26 @@ function PluginDetailContent(props: { plugin: TaskPluginListItem }) {
   })
   const activateMutation = useMutation({
     mutationFn: (version: string) => activateTaskPlugin(key, version),
-    onSuccess: () => {
+    onSuccess: (notice) => {
       setCompareVersion('')
-      toast.success(t('Plugin version activated'))
+      toastPluginChange(t('Plugin version activated'), notice?.pricing_issues)
       queryClient.invalidateQueries({ queryKey: ['task-plugins'] })
       queryClient.invalidateQueries({ queryKey: ['task-plugin', key] })
       queryClient.invalidateQueries({ queryKey: ['task-plugin-versions', key] })
+      queryClient.invalidateQueries({
+        queryKey: MODEL_PRICING_ISSUES_QUERY_KEY,
+      })
     },
     onError: (error) => handleServerError(error),
   })
   const detail = detailQuery.data
   const versions = versionsQuery.data ?? []
+  const parts = resolvePluginParts(detail ?? props.plugin)
+  // A provider-only plugin has no billing parameters or task sandbox.
+  const tab =
+    !parts.task && (activeTab === 'billing' || activeTab === 'sandbox')
+      ? 'overview'
+      : activeTab
   const description = resolveLocalizedText(
     detail?.meta.description ?? props.plugin?.meta.description,
     i18n.language
@@ -145,6 +159,16 @@ function PluginDetailContent(props: { plugin: TaskPluginListItem }) {
 
   const panelClassName =
     'min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-4 sm:p-6 data-hidden:hidden'
+  const usageProfiles = detail?.meta.usageProfiles ?? []
+  const groupedUsageModels = new Set(
+    usageProfiles.flatMap((profile) => profile.models)
+  )
+  const defaultUsageModels = (detail?.meta.models ?? []).filter(
+    (model) => !groupedUsageModels.has(model)
+  )
+  const showDefaultUsage =
+    Object.keys(detail?.meta.usageSchema ?? {}).length > 0 &&
+    (usageProfiles.length === 0 || defaultUsageModels.length > 0)
   return (
     <SheetContent
       showCloseButton={false}
@@ -174,7 +198,10 @@ function PluginDetailContent(props: { plugin: TaskPluginListItem }) {
             />
           </span>
           <span className='min-w-0 text-lg font-semibold break-words'>
-            {detail?.meta.name ?? props.plugin.meta.name}
+            {localizedPluginName(
+              detail?.meta ?? props.plugin.meta,
+              i18n.language
+            )}
           </span>
         </SheetTitle>
         <div className='flex min-w-0 items-center gap-1'>
@@ -194,12 +221,21 @@ function PluginDetailContent(props: { plugin: TaskPluginListItem }) {
             {detail?.meta.version ?? props.plugin.meta.version}
           </Badge>
         </div>
+        {(parts.provider || parts.login || parts.transform) && (
+          <div className='flex flex-wrap items-center gap-1.5'>
+            <PluginPartsBadges
+              provider={parts.provider}
+              login={parts.login}
+              transform={parts.transform}
+            />
+          </div>
+        )}
         <SheetDescription className='max-h-24 overflow-y-auto text-xs leading-relaxed break-words'>
           {description || t('Not declared')}
         </SheetDescription>
       </SheetHeader>
       <Tabs
-        value={activeTab}
+        value={tab}
         onValueChange={(value) => {
           setActiveTab(String(value))
           if (value === 'sandbox') setSandboxVisited(true)
@@ -213,24 +249,59 @@ function PluginDetailContent(props: { plugin: TaskPluginListItem }) {
             aria-label={t('Plugin details')}
           >
             <TabsTrigger value='overview'>{t('Overview')}</TabsTrigger>
-            <TabsTrigger value='billing'>{t('Billing parameters')}</TabsTrigger>
+            {parts.task && (
+              <TabsTrigger value='billing'>
+                {t('Billing parameters')}
+              </TabsTrigger>
+            )}
             <TabsTrigger value='source'>{t('Plugin source')}</TabsTrigger>
             <TabsTrigger value='versions'>{t('Version history')}</TabsTrigger>
             <TabsTrigger value='diff'>{t('Source diff')}</TabsTrigger>
-            <TabsTrigger value='sandbox'>{t('Plugin sandbox')}</TabsTrigger>
+            {parts.task && (
+              <TabsTrigger value='sandbox'>{t('Plugin sandbox')}</TabsTrigger>
+            )}
           </TabsList>
         </div>
         <TabsContent value='overview' className={panelClassName}>
-          {detailState ?? (detail && <PluginMetadataCard meta={detail.meta} />)}
+          {detailState ??
+            (detail && (
+              <PluginMetadataCard
+                meta={detail.meta}
+                skippedRoutes={detail.skipped_routes}
+                transformHooks={detail.transform_hooks}
+                parts={parts}
+              />
+            ))}
         </TabsContent>
         <TabsContent value='billing' className={panelClassName}>
-          {detailState ??
-            (detail?.meta.usageSchema &&
-            Object.keys(detail.meta.usageSchema).length > 0 ? (
-              <UsageSchemaTable schema={detail.meta.usageSchema} />
-            ) : (
-              <EmptyState title={t('No billing parameters declared')} />
-            ))}
+          {detailState ?? (
+            <div className='space-y-6'>
+              {showDefaultUsage && detail?.meta.usageSchema && (
+                <section className='space-y-3' aria-label={t('Default')}>
+                  {usageProfiles.length > 0 && (
+                    <>
+                      <h3 className='text-sm font-medium'>{t('Default')}</h3>
+                      <PluginModelList models={defaultUsageModels} />
+                    </>
+                  )}
+                  <UsageSchemaTable schema={detail.meta.usageSchema} />
+                </section>
+              )}
+              {usageProfiles.map((profile) => (
+                <section
+                  key={profile.models[0]}
+                  aria-label={profile.models.join(', ')}
+                  className='space-y-3'
+                >
+                  <PluginModelList models={profile.models} />
+                  <UsageSchemaTable schema={profile.schema} />
+                </section>
+              ))}
+              {!showDefaultUsage && usageProfiles.length === 0 && (
+                <EmptyState title={t('No billing parameters declared')} />
+              )}
+            </div>
+          )}
         </TabsContent>
         <TabsContent value='source' className={panelClassName}>
           {detailState ??

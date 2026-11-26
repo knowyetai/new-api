@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/go-redis/redis/v8"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/pquerna/otp/totp"
@@ -27,6 +28,7 @@ func TestHardDeleteUserFailsClosedWhenAuthFenceCannotPublish(t *testing.T) {
 		return ClaimExternalIdentityWithTx(tx, ExternalIdentityProviderTelegram, user.TelegramId, user.Id)
 	}))
 	require.NoError(t, DB.Create(&Token{UserId: user.Id, Key: "hard-delete-token"}).Error)
+	require.NoError(t, DB.Create(&UserAccessToken{UserId: user.Id, TokenHash: AccessTokenFingerprint("nap_hard-delete-token")}).Error)
 	require.NoError(t, DB.Create(&TwoFA{UserId: user.Id, Secret: "secret", IsEnabled: true}).Error)
 	require.NoError(t, DB.Create(&TwoFABackupCode{UserId: user.Id, CodeHash: "hash"}).Error)
 	require.NoError(t, DB.Create(&PasskeyCredential{UserID: user.Id, CredentialID: "credential", PublicKey: "public-key"}).Error)
@@ -54,7 +56,8 @@ func TestHardDeleteUserFailsClosedWhenAuthFenceCannotPublish(t *testing.T) {
 		common.RedisEnabled, common.RDB = oldRedisEnabled, oldRDB
 	})
 
-	require.Error(t, HardDeleteUserById(user.Id))
+	_, err := HardDeleteUserById(user.Id)
+	require.Error(t, err)
 
 	var count int64
 	require.NoError(t, DB.Unscoped().Model(&User{}).Where("id = ?", user.Id).Count(&count).Error)
@@ -68,6 +71,7 @@ func TestHardDeleteUserFailsClosedWhenAuthFenceCannotPublish(t *testing.T) {
 		&UserSession{},
 		&AuthFlow{},
 		&ExternalIdentityClaim{},
+		&UserAccessToken{},
 	} {
 		require.NoError(t, DB.Unscoped().Model(record).Where("user_id = ?", user.Id).Count(&count).Error)
 		assert.EqualValues(t, 1, count)
@@ -87,6 +91,7 @@ func TestHardDeleteUserPublishesTombstoneAndPurgesAuthenticationData(t *testing.
 		return ClaimExternalIdentityWithTx(tx, ExternalIdentityProviderTelegram, user.TelegramId, user.Id)
 	}))
 	require.NoError(t, DB.Create(&Token{UserId: user.Id, Key: "hard-delete-success-token"}).Error)
+	require.NoError(t, DB.Create(&UserAccessToken{UserId: user.Id, TokenHash: AccessTokenFingerprint("nap_hard-delete-success-token")}).Error)
 	require.NoError(t, DB.Create(&TwoFA{UserId: user.Id, Secret: "secret", IsEnabled: true}).Error)
 	require.NoError(t, DB.Create(&TwoFABackupCode{UserId: user.Id, CodeHash: "hash"}).Error)
 	require.NoError(t, DB.Create(&PasskeyCredential{UserID: user.Id, CredentialID: "credential-success", PublicKey: "public-key"}).Error)
@@ -105,7 +110,9 @@ func TestHardDeleteUserPublishesTombstoneAndPurgesAuthenticationData(t *testing.
 	// user; the shared version increment must therefore query unscoped.
 	require.NoError(t, DB.Delete(&user).Error)
 
-	require.NoError(t, HardDeleteUserById(user.Id))
+	revokedAccessTokens, err := HardDeleteUserById(user.Id)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, revokedAccessTokens)
 
 	var count int64
 	require.NoError(t, DB.Unscoped().Model(&User{}).Where("id = ?", user.Id).Count(&count).Error)
@@ -119,6 +126,7 @@ func TestHardDeleteUserPublishesTombstoneAndPurgesAuthenticationData(t *testing.
 		&UserSession{},
 		&AuthFlow{},
 		&ExternalIdentityClaim{},
+		&UserAccessToken{},
 	} {
 		require.NoError(t, DB.Unscoped().Model(record).Where("user_id = ?", user.Id).Count(&count).Error)
 		assert.Zero(t, count)
@@ -155,6 +163,49 @@ func TestIncrementFailedAttemptsCountsConcurrentFailures(t *testing.T) {
 	var reloaded TwoFA
 	require.NoError(t, DB.First(&reloaded, twoFA.Id).Error)
 	assert.Equal(t, attempts, reloaded.FailedAttempts)
+}
+
+func TestIncrementFailedAttemptsRestartsWindowAfterLockoutExpires(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		lockedUntil     time.Duration
+		failures        int
+		wantAttempts    int
+		wantLocked      bool
+		keepLockedUntil bool
+	}{
+		{name: "first failure after expiry", lockedUntil: -time.Minute, failures: 1, wantAttempts: 1, wantLocked: false},
+		{name: "max failures after expiry", lockedUntil: -time.Minute, failures: common.MaxFailAttempts, wantAttempts: common.MaxFailAttempts, wantLocked: true},
+		{name: "failure during active lockout", lockedUntil: time.Minute, failures: 1, wantAttempts: common.MaxFailAttempts, wantLocked: true, keepLockedUntil: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			truncateTables(t)
+
+			user := User{Username: "twofa-expiry-user", Password: "password"}
+			require.NoError(t, DB.Create(&user).Error)
+			lockedUntil := time.Now().Add(tc.lockedUntil)
+			twoFA := TwoFA{UserId: user.Id, Secret: "secret", IsEnabled: true, FailedAttempts: common.MaxFailAttempts, LockedUntil: &lockedUntil}
+			require.NoError(t, DB.Create(&twoFA).Error)
+			var stored TwoFA
+			require.NoError(t, DB.First(&stored, twoFA.Id).Error)
+
+			for range tc.failures {
+				require.NoError(t, (&TwoFA{Id: twoFA.Id}).IncrementFailedAttempts())
+			}
+
+			var reloaded TwoFA
+			require.NoError(t, DB.First(&reloaded, twoFA.Id).Error)
+			assert.Equal(t, tc.wantAttempts, reloaded.FailedAttempts)
+			assert.Equal(t, tc.wantLocked, reloaded.IsLocked())
+			if !tc.wantLocked {
+				assert.Nil(t, reloaded.LockedUntil)
+			}
+			if tc.keepLockedUntil {
+				require.NotNil(t, reloaded.LockedUntil)
+				assert.True(t, stored.LockedUntil.Equal(*reloaded.LockedUntil), "lockout must not be extended")
+			}
+		})
+	}
 }
 
 func TestValidateBackupCodeCanOnlySucceedOnce(t *testing.T) {
@@ -260,6 +311,22 @@ func TestSecurityFactorMutationsAdvanceUserAuthVersion(t *testing.T) {
 
 func TestUpdatePasskeyAssertionStateCannotRewriteRegistrationIdentity(t *testing.T) {
 	truncateTables(t)
+	require.NoError(t, DB.AutoMigrate(&Option{}))
+	previousSettings := *system_setting.GetPasskeySettings()
+	domainKeys := map[string]any{"key": []string{"ServerAddress", "passkey.rp_id", "passkey.legacy_rp_ids", "passkey.origins"}}
+	var previousOptions []Option
+	require.NoError(t, DB.Where(domainKeys).Find(&previousOptions).Error)
+	t.Cleanup(func() {
+		*system_setting.GetPasskeySettings() = previousSettings
+		require.NoError(t, DB.Where(domainKeys).Delete(&Option{}).Error)
+		if len(previousOptions) > 0 {
+			require.NoError(t, DB.Create(&previousOptions).Error)
+		}
+	})
+	*system_setting.GetPasskeySettings() = system_setting.PasskeySettings{RPID: "example.com", Origins: "https://example.com"}
+	for _, option := range []Option{{Key: "passkey.rp_id", Value: "example.com"}, {Key: "passkey.legacy_rp_ids", Value: ""}, {Key: "passkey.origins", Value: "https://example.com"}} {
+		require.NoError(t, DB.Save(&option).Error)
+	}
 
 	user := User{Username: "passkey-assertion-state", Password: "password", AuthVersion: 1}
 	require.NoError(t, DB.Create(&user).Error)
@@ -292,7 +359,7 @@ func TestUpdatePasskeyAssertionStateCannotRewriteRegistrationIdentity(t *testing
 			CloneWarning: true,
 		},
 	}
-	require.NoError(t, UpdatePasskeyAssertionState(user.Id, validated, usedAt))
+	require.NoError(t, UpdatePasskeyAssertionState(user.Id, validated, usedAt, "example.com"))
 
 	var updated PasskeyCredential
 	require.NoError(t, DB.First(&updated, stored.ID).Error)
@@ -312,7 +379,7 @@ func TestUpdatePasskeyAssertionStateCannotRewriteRegistrationIdentity(t *testing
 	assert.Equal(t, usedAt.Unix(), updated.LastUsedAt.Unix())
 
 	validated.ID = []byte("another-credential")
-	assert.ErrorIs(t, UpdatePasskeyAssertionState(user.Id, validated, usedAt), ErrPasskeyNotFound)
+	assert.ErrorIs(t, UpdatePasskeyAssertionState(user.Id, validated, usedAt, "example.com"), ErrPasskeyNotFound)
 }
 
 func assertUserAuthVersion(t *testing.T, userID int, expected int64) {

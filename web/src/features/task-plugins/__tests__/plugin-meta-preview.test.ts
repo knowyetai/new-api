@@ -21,6 +21,7 @@ import { describe, expect, test, vi } from 'vitest'
 import { parseMarketplaceIndex } from '../lib/marketplace'
 import {
   parsePluginMetaPreview,
+  readPluginSourceParts,
   resolvePluginMetaPreview,
 } from '../lib/plugin-meta-preview'
 import type { MarketplacePlugin } from '../types'
@@ -109,6 +110,112 @@ test('supports comments, trailing commas, quoted keys and JavaScript string esca
   })
 })
 
+test('previews TypeSafe model constants used by a read-only validation hook', () => {
+  const preview = parsePluginMetaPreview(`
+    const MODELS = ['jev-1.13.0', 'jev-latest', 'jev-preview'];
+    export const meta = {
+      models: MODELS,
+      routes: [{method: 'POST', path: '/typesafe/v1/systemone', type: 'submit'}],
+    };
+    function validate(model) { return MODELS.includes(model); }
+  `)
+  expect(preview.status).toBe('parsed')
+  expect(preview.fields.models).toEqual({
+    state: 'value',
+    origin: 'source',
+    value: ['jev-1.13.0', 'jev-latest', 'jev-preview'],
+  })
+})
+
+test('resolves earlier local constants and nested aliases without using index hints', () => {
+  const preview = parsePluginMetaPreview(`
+    const MODEL = 'source-model', MODELS = [MODEL];
+    const ALIAS /* comment */ = /* comment */ MODELS;
+    const ROUTE = {method: 'POST', path: '/source/submit', type: 'submit', models: ALIAS};
+    export const meta = {models: ALIAS, routes: [ROUTE]};
+  `)
+  expect(preview.status).toBe('parsed')
+  const fields = resolvePluginMetaPreview(plugin, plugin.versions[0], preview)
+  expect(fields.models).toEqual({
+    state: 'value',
+    origin: 'source',
+    value: ['source-model'],
+  })
+  expect(fields.routes).toEqual({
+    state: 'value',
+    origin: 'source',
+    value: [
+      {
+        method: 'POST',
+        path: '/source/submit',
+        type: 'submit',
+        models: ['source-model'],
+      },
+    ],
+  })
+})
+
+test.each([
+  'let MODELS = ["m"];',
+  'export const MODELS = ["m"];',
+  'const MODELS = getModels();',
+  'const MODELS = LATER; const LATER = ["m"];',
+  'const MODELS = ALIAS; const ALIAS = MODELS;',
+  'const MODELS = ["m"]; MODELS.push("changed");',
+  'const MODELS = ["m"]; MODELS[0] = "changed";',
+  'const MODELS = ["m"]; mutate(MODELS);',
+  'const MODELS = ["m"]; const ALIAS = MODELS; ALIAS.push("changed");',
+  'const MODELS = ["m"]; const BOX = {models: MODELS}; mutate(BOX);',
+  'const MODELS = ["m"]; const BOX = {models: MODELS, includes() { this.models.push("changed"); }}; BOX.includes();',
+  'const MODELS = ["m"]; export {MODELS};',
+  'const MODELS = ["m"]; function expose() { return MODELS; }',
+  'const MODELS = ["m"]; function change(MODELS) { MODELS.push("changed"); }',
+])('keeps unsafe or non-static model constants unknown: %s', (declaration) => {
+  const preview = parsePluginMetaPreview(`
+    ${declaration}
+    export const meta = {models: MODELS, baseUrl: 'https://example.com'};
+  `)
+  expect(preview.status).toBe('partial')
+  expect(preview.fields.models).toEqual({ state: 'unknown' })
+  expect(preview.fields.baseUrl).toEqual({
+    state: 'value',
+    origin: 'source',
+    value: 'https://example.com',
+  })
+})
+
+test('rejects mutations after metadata initialization through a constant alias', () => {
+  const preview = parsePluginMetaPreview(`
+    const MODELS = ['m'];
+    export const meta = {models: MODELS};
+    const ALIAS = MODELS;
+    ALIAS.splice(0, 1);
+  `)
+  expect(preview.status).toBe('partial')
+  expect(preview.fields.models).toEqual({ state: 'unknown' })
+})
+
+test('bounds repeated constant expansion and keeps unrelated literal fields readable', () => {
+  const declarations = ["const LEVEL0 = ['m'];"]
+  for (let i = 1; i <= 16; i += 1) {
+    declarations.push(`const LEVEL${i} = [LEVEL${i - 1}, LEVEL${i - 1}];`)
+  }
+  const preview = parsePluginMetaPreview(`
+    ${declarations.join('\n')}
+    export const meta = {
+      routes: [{method: 'POST', path: '/jobs', type: 'submit', extra: LEVEL16}],
+      models: ['m'],
+    };
+  `)
+  expect(preview.status).toBe('partial')
+  expect(preview.fields.routes).toEqual({ state: 'unknown' })
+  expect(preview.fields.models).toEqual({
+    state: 'value',
+    origin: 'source',
+    value: ['m'],
+  })
+})
+
 describe('unreadable declarations never produce partial lists or execute code', () => {
   test.each([
     'export const meta = { ...external, models: ["m"] };',
@@ -118,6 +225,7 @@ describe('unreadable declarations never produce partial lists or execute code', 
     'export const meta = { models: ["m"] }; mutate(meta);',
     'export const meta = { models: ["m"] ',
     'const meta = { models: ["m"] }; export {meta};',
+    String.raw`const MODELS = ["m"]; M\u004fDELS.push("changed"); export const meta = {models: MODELS};`,
   ])('keeps every field unknown for %s', (source) => {
     const preview = parsePluginMetaPreview(source)
     expect(preview.status).toBe('unavailable')
@@ -146,13 +254,14 @@ describe('unreadable declarations never produce partial lists or execute code', 
     })
   })
 
-  test('does not invoke a metadata expression or top-level plugin statement', () => {
+  test.each([
+    'previewProbe(); export const meta = {models: ["m"], routes: previewProbe()};',
+    'previewProbe(); const ROUTES = previewProbe(); export const meta = {models: ["m"], routes: ROUTES};',
+  ])('does not invoke plugin code: %s', (source) => {
     const probe = vi.fn()
     vi.stubGlobal('previewProbe', probe)
     try {
-      const preview = parsePluginMetaPreview(
-        'previewProbe(); export const meta = {models: ["m"], routes: previewProbe()};'
-      )
+      const preview = parsePluginMetaPreview(source)
       expect(preview.status).toBe('partial')
       expect(probe).not.toHaveBeenCalled()
     } finally {
@@ -213,4 +322,56 @@ test('preserves valid protocol declarations and empty model lists from the marke
   expect(
     index.plugins.find((entry) => entry.key === 'empty')?.protocols
   ).toEqual([])
+})
+
+test.each([
+  [
+    'a task plugin',
+    'export const meta = {key: "a"}\nexport function buildSubmitRequest() {}',
+    { task: true, provider: false, transform: false },
+  ],
+  [
+    'a provider plugin',
+    'export const meta = {key: "a", relay: [{incoming_path: "/v1/chat"}]}',
+    { task: false, provider: true, transform: false },
+  ],
+  [
+    'an empty relay list',
+    'export const meta = {key: "a", relay: []}',
+    { task: false, provider: false, transform: false },
+  ],
+  [
+    'a request processing plugin exporting a hook by name',
+    'export const meta = {key: "a"}\nconst check = () => {}\nexport { check as request }',
+    { task: false, provider: false, transform: true },
+  ],
+  [
+    'a renamed export that only looks like a hook',
+    'export const meta = {key: "a"}\nconst request = () => {}\nexport { request as other }',
+    { task: false, provider: false, transform: false },
+  ],
+])('reads the parts of %s from its code', (_name, source, parts) => {
+  expect(readPluginSourceParts(source)).toEqual(parts)
+})
+
+test.each([
+  [
+    'meta is built at run time',
+    'export const meta = makeMeta()\nexport function reply() {}',
+  ],
+  // The literal has no relay, but the gateway loads the routes added later.
+  [
+    'later code changes meta',
+    'export const meta = {key: "a"}\nmeta.relay = [{incoming_path: "/v1/chat"}]',
+  ],
+  [
+    'meta is passed to other code',
+    'export const meta = {key: "a"}\nsetup(meta)',
+  ],
+  [
+    'the code does not parse',
+    'export const meta = {key: "a"}\nexport function (',
+  ],
+])('cannot read the parts when %s', (_name, source) => {
+  expect(readPluginSourceParts(source)).toBeNull()
 })
