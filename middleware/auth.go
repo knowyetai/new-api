@@ -289,17 +289,22 @@ func requestAccessTokenLookup(c *gin.Context) *accessTokenLookup {
 func enforceAccessTokenRoute(c *gin.Context, lookup *accessTokenLookup, abort bool) bool {
 	key := c.Request.Method + " " + c.FullPath()
 	rule, declared := AccessTokenRouteRule(key)
+	scopes := lookup.token.GetScopes()
 	code, reason := "", ""
 	var message *common.Message
 	switch {
 	case declared && rule.kind == accessTokenRuleSession:
 		code, reason, message = "AUTH_SESSION_REQUIRED", "session_required", common.NewMessage(accessTokenSessionRequiredMsg)
-	case lookup.legacy:
+	// The provisioning endpoint requires an explicit grant even during the legacy transition.
+	case lookup.legacy && key != modelCredentialAccessTokenRoute:
 		return true
 	case !declared:
 		common.SysError(common.LogText("access token route is not declared: %s", key))
 		code, reason, message = "ACCESS_TOKEN_ROUTE_UNDECLARED", "route_undeclared", common.NewMessage("Unauthorized, insufficient privileges")
-	case rule.kind == accessTokenRuleAny, service.AccessTokenScopeGranted(lookup.token.GetScopes(), rule.scope):
+	// Dedicated provisioning tokens must also be rejected on routes that normally accept any PAT.
+	case key != modelCredentialAccessTokenRoute && service.AccessTokenScopeGranted(scopes, service.ModelCredentialAccessTokenScope):
+		code, reason, message = "ACCESS_TOKEN_SCOPE_DENIED", "scope_denied", common.NewMessage("Unauthorized, insufficient privileges")
+	case rule.kind == accessTokenRuleAny, service.AccessTokenScopeGranted(scopes, rule.scope):
 		return true
 	default:
 		code, reason, message = "ACCESS_TOKEN_SCOPE_DENIED", "scope_denied", common.NewMessage("The access token lacks the required permission: {{scope}}", map[string]any{"scope": rule.scope})

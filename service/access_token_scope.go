@@ -19,6 +19,9 @@ const (
 	AccessTokenDefaultExpiryDays = 30
 	accessTokenActionReveal      = "reveal"
 	accessTokenScopeSeparator    = ":"
+
+	modelCredentialAccessTokenResource = "model_credentials"
+	ModelCredentialAccessTokenScope    = modelCredentialAccessTokenResource + accessTokenScopeSeparator + authz.ActionWrite
 )
 
 var (
@@ -104,6 +107,9 @@ var accessTokenStaticResources = []AccessTokenResource{
 		accessTokenView("View system settings, custom OAuth providers, and price sync sources."),
 		accessTokenEdit("Change system settings and custom OAuth providers, and sync prices."),
 	}},
+	{Resource: modelCredentialAccessTokenResource, LabelKey: "Model credentials", group: AccessTokenGroupSystem, minRole: common.RoleRootUser, Actions: []authz.ActionDefinition{
+		accessTokenEdit("Resolve model credentials for trusted platform services. Grant this permission in a separate access token."),
+	}},
 	{Resource: "plugin", LabelKey: "Task plugins", group: AccessTokenGroupSystem, minRole: common.RoleRootUser, Actions: []authz.ActionDefinition{
 		accessTokenView("View installed task plugins and their settings."),
 		accessTokenEdit("Install, configure, test, and remove task plugins."),
@@ -174,6 +180,9 @@ func AccessTokenScopeDictionary() []AccessTokenResource {
 func NormalizeAccessTokenScopes(userID, role int, scopes []string) ([]string, error) {
 	normalized, ok := NormalizeAccessTokenScopeList(scopes)
 	if !ok {
+		return nil, ErrAccessTokenScopeInvalid
+	}
+	if len(normalized) > 1 && slices.Contains(normalized, ModelCredentialAccessTokenScope) {
 		return nil, ErrAccessTokenScopeInvalid
 	}
 	grantable := make(map[string]bool)
