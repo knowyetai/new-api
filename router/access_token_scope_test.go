@@ -169,6 +169,8 @@ func TestAccessTokenCatalogCoversEveryPermission(t *testing.T) {
 }
 
 func TestModelCredentialProvisioningWithDedicatedAccessToken(t *testing.T) {
+	const legacyFingerprintEnv = "MODEL_CREDENTIALS_LEGACY_TOKEN_SHA256"
+	t.Setenv(legacyFingerprintEnv, "")
 	previousDB, previousLogDB := model.DB, model.LOG_DB
 	previousLoginEncryption := common.PasswordLoginEncryptionEnabled
 	common.PasswordLoginEncryptionEnabled = false
@@ -180,7 +182,7 @@ func TestModelCredentialProvisioningWithDedicatedAccessToken(t *testing.T) {
 	require.NoError(t, model.DB.AutoMigrate(
 		&model.Option{}, &model.UserSession{}, &model.UserAccessToken{}, &model.AuthFlow{},
 		&model.TwoFA{}, &model.PasskeyCredential{}, &model.AuditLog{},
-		&model.CustomOAuthProvider{}, &model.UserOAuthBinding{},
+		&model.CustomOAuthProvider{}, &model.UserOAuthBinding{}, &model.BillingUnit{}, &model.BillingUnitMember{},
 	))
 	require.NoError(t, model.EnsureLegacyAccessTokenRetireAt(common.GetTimestamp()))
 
@@ -189,12 +191,13 @@ func TestModelCredentialProvisioningWithDedicatedAccessToken(t *testing.T) {
 		provisioningScope = "model_credentials:write"
 		issuer            = "https://identity.example.invalid"
 		password          = "provisioning-test-password"
+		legacy            = "provisioning-legacy-test-token"
 	)
 	passwordHash, err := common.Password2Hash(password)
 	require.NoError(t, err)
-	legacy := "provisioning-legacy-test-token"
+	legacyToken := legacy
 	root := model.User{Username: "provisioning-root", Group: "default", Role: common.RoleRootUser,
-		Status: common.UserStatusEnabled, AuthVersion: 1, AffCode: "test-root", Password: passwordHash, AccessToken: &legacy}
+		Status: common.UserStatusEnabled, AuthVersion: 1, AffCode: "test-root", Password: passwordHash, AccessToken: &legacyToken}
 	admin := model.User{Username: "provisioning-admin", Group: "default", Role: common.RoleAdminUser,
 		Status: common.UserStatusEnabled, AuthVersion: 1, AffCode: "test-admin"}
 	require.NoError(t, model.DB.Create(&root).Error)
@@ -330,6 +333,49 @@ func TestModelCredentialProvisioningWithDedicatedAccessToken(t *testing.T) {
 	require.NoError(t, err)
 	result = request(t, http.MethodPost, provisioningPath, dedicated, "", identity, http.StatusUnauthorized)
 	assert.Equal(t, "AUTH_UNAUTHORIZED", result.Code)
+
+	t.Run("existing service credential survives the dashboard transition", func(t *testing.T) {
+		deadline := model.LegacyAccessTokenRetireAt()
+		option := model.DB.Model(&model.Option{}).Where(&model.Option{Key: "LegacyAccessTokenRetireAt"})
+		t.Cleanup(func() {
+			require.NoError(t, option.Update("value", strconv.FormatInt(deadline, 10)).Error)
+			require.NoError(t, model.EnsureLegacyAccessTokenRetireAt(common.GetTimestamp()))
+		})
+
+		t.Setenv(legacyFingerprintEnv, model.AccessTokenFingerprint(legacy))
+		before := request(t, http.MethodPost, provisioningPath, legacy, "", identity, http.StatusOK)
+		require.True(t, before.Success)
+		require.NoError(t, option.Update("value", strconv.FormatInt(common.GetTimestamp()-1, 10)).Error)
+		require.NoError(t, model.EnsureLegacyAccessTokenRetireAt(common.GetTimestamp()))
+		after := request(t, http.MethodPost, provisioningPath, legacy, "", identity, http.StatusOK)
+		require.True(t, after.Success)
+		assert.Equal(t, first.Data.UserID, after.Data.UserID)
+		assert.Equal(t, first.Data.TokenID, after.Data.TokenID)
+
+		otherRoute := request(t, http.MethodGet, "/api/verify/methods", legacy, "", nil, http.StatusUnauthorized)
+		assert.Equal(t, "ACCESS_TOKEN_LEGACY_RETIRED", otherRoute.Code)
+		otherToken := request(t, http.MethodPost, provisioningPath, strings.ToUpper(legacy), "", identity, http.StatusUnauthorized)
+		assert.Equal(t, "ACCESS_TOKEN_LEGACY_RETIRED", otherToken.Code)
+
+		require.NoError(t, model.DB.Model(&root).Update("role", common.RoleAdminUser).Error)
+		downgraded := request(t, http.MethodPost, provisioningPath, legacy, "", identity, http.StatusForbidden)
+		assert.Equal(t, "AUTH_INSUFFICIENT_PRIVILEGE", downgraded.Code)
+		require.NoError(t, model.DB.Model(&root).Update("role", common.RoleRootUser).Error)
+
+		t.Setenv(legacyFingerprintEnv, "")
+		unpinned := request(t, http.MethodPost, provisioningPath, legacy, "", identity, http.StatusUnauthorized)
+		assert.Equal(t, "ACCESS_TOKEN_LEGACY_RETIRED", unpinned.Code)
+		t.Setenv(legacyFingerprintEnv, model.AccessTokenFingerprint(legacy))
+
+		require.NoError(t, model.DB.Model(&root).Update("access_token", strings.ToUpper(legacy)).Error)
+		rotated := request(t, http.MethodPost, provisioningPath, legacy, "", identity, http.StatusUnauthorized)
+		assert.Equal(t, "AUTH_UNAUTHORIZED", rotated.Code)
+		require.NoError(t, model.DB.Model(&root).Update("access_token", legacy).Error)
+		_, err := model.RevokeUserAccessToken(root.Id)
+		require.NoError(t, err)
+		revoked := request(t, http.MethodPost, provisioningPath, legacy, "", identity, http.StatusUnauthorized)
+		assert.Equal(t, "AUTH_UNAUTHORIZED", revoked.Code)
+	})
 }
 
 func TestAccessTokenVerificationScopesAreAllListed(t *testing.T) {

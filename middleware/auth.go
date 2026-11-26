@@ -237,11 +237,12 @@ func classifyDashboardCredential(c *gin.Context) (*model.UserBase, service.AuthI
 // accessTokenLookup is the per-request result of resolving an opaque dashboard
 // credential. A nil user with a nil err means the value is not a PAT.
 type accessTokenLookup struct {
-	ref    string
-	legacy bool
-	token  *model.UserAccessToken
-	user   *model.UserBase
-	err    error
+	ref                   string
+	legacy                bool
+	legacyModelCredential bool
+	token                 *model.UserAccessToken
+	user                  *model.UserBase
+	err                   error
 }
 
 // lookupAccessToken resolves raw once per request, so the access audit and
@@ -255,9 +256,17 @@ func lookupAccessToken(c *gin.Context, raw string) *accessTokenLookup {
 	c.Set(accessTokenLookupContextKey, lookup)
 	if !strings.HasPrefix(raw, model.AccessTokenPrefix) {
 		lookup.legacy = true
-		legacyUser, err := model.ValidateAccessToken(raw)
-		if err != nil || legacyUser == nil || legacyUser.Id <= 0 {
-			lookup.err = err
+		var legacyUser *model.User
+		if c.Request.Method+" "+c.FullPath() == modelCredentialAccessTokenRoute {
+			legacyUser, lookup.legacyModelCredential, lookup.err = model.ValidateModelCredentialLegacyAccessToken(raw)
+		} else {
+			legacyUser, lookup.err = model.ValidateAccessToken(raw)
+		}
+		if lookup.err != nil || legacyUser == nil || legacyUser.Id <= 0 {
+			return lookup
+		}
+		if lookup.legacyModelCredential {
+			lookup.user = legacyUser.ToBaseUser()
 			return lookup
 		}
 		lookup.user, lookup.err = model.GetUserCache(legacyUser.Id)
@@ -295,8 +304,10 @@ func enforceAccessTokenRoute(c *gin.Context, lookup *accessTokenLookup, abort bo
 	switch {
 	case declared && rule.kind == accessTokenRuleSession:
 		code, reason, message = "AUTH_SESSION_REQUIRED", "session_required", common.NewMessage(accessTokenSessionRequiredMsg)
-	// The provisioning endpoint requires an explicit grant even during the legacy transition.
-	case lookup.legacy && key != modelCredentialAccessTokenRoute:
+	case lookup.legacy && (key != modelCredentialAccessTokenRoute || lookup.legacyModelCredential):
+		if abort && lookup.legacyModelCredential {
+			setAccessTokenAuditParam(c, "legacy_model_credential", true)
+		}
 		return true
 	case !declared:
 		common.SysError(common.LogText("access token route is not declared: %s", key))
