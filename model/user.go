@@ -15,6 +15,7 @@ import (
 	"github.com/bytedance/gopkg/util/gopool"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 const UserNameMaxLength = 20
@@ -1236,14 +1237,17 @@ func ValidateAccessToken(token string) (*User, error) {
 	if LegacyAccessTokensRetired(common.GetTimestamp()) {
 		return nil, ErrLegacyAccessTokenRetired
 	}
-	token = strings.Replace(token, "Bearer ", "", 1)
+	return findUserByLegacyAccessToken(strings.Replace(token, "Bearer ", "", 1))
+}
+
+func findUserByLegacyAccessToken(token string) (*User, error) {
 	user := &User{}
-	err := DB.Where("access_token = ?", token).First(user).Error
+	err := DB.Session(&gorm.Session{Logger: gormlogger.Discard}).Where("access_token = ?", token).First(user).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("%w: %v", ErrDatabase, err)
+		return nil, fmt.Errorf("%w: %v", ErrDatabase, sanitizeDBError(err))
 	}
 	return user, nil
 }

@@ -12,6 +12,8 @@ import (
 
 type accessTokenRuleKind int
 
+const modelCredentialAccessTokenRoute = "POST /api/integrations/model-credentials"
+
 const (
 	// accessTokenRuleScope requires the token to carry scope.
 	accessTokenRuleScope accessTokenRuleKind = iota + 1
@@ -343,8 +345,8 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"GET /api/billing-unit-invitations/self":                     accessTokenScopeRule("wallet:read"),
 	"POST /api/billing-unit-invitations/:invitation_id/:action":  accessTokenScopeRule("wallet:write"),
 
-	// fork: trusted root-backend integration endpoint; never accept PATs.
-	"POST /api/integrations/model-credentials": accessTokenSessionRule,
+	// Trusted platform callers use a token dedicated to this endpoint.
+	modelCredentialAccessTokenRoute: accessTokenScopeRule(service.ModelCredentialAccessTokenScope),
 
 	// router/relay-router.go
 	"POST /pg/chat/completions": accessTokenSessionRule,

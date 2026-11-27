@@ -1,7 +1,9 @@
 package model
 
 import (
+	"crypto/subtle"
 	"errors"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -17,6 +19,7 @@ const (
 	AccessTokenPrefix                = "nap_"
 	AccessTokenSessionPrefix         = "pat:"
 	AccessTokenSessionVersion        = 1
+	modelCredentialLegacyTokenEnv    = "MODEL_CREDENTIALS_LEGACY_TOKEN_SHA256"
 	legacyAccessTokenRetireAtKey     = "LegacyAccessTokenRetireAt"
 	legacyAccessTokenTransitionDays  = 30
 	userAccessTokenCleanupBatchSize  = 500
@@ -326,4 +329,22 @@ func LegacyAccessTokenRetireAt() int64 {
 func LegacyAccessTokensRetired(now int64) bool {
 	retireAt := legacyAccessTokenRetireAt.Load()
 	return retireAt <= 0 || now >= retireAt
+}
+
+// ValidateModelCredentialLegacyAccessToken resolves legacy credentials on the
+// provisioning route. A pinned credential still needs its original user row
+// after the dashboard transition ends.
+func ValidateModelCredentialLegacyAccessToken(token string) (*User, bool, error) {
+	configured := strings.ToLower(strings.TrimSpace(os.Getenv(modelCredentialLegacyTokenEnv)))
+	fingerprint := AccessTokenFingerprint(token)
+	if configured == "" || subtle.ConstantTimeCompare([]byte(configured), []byte(fingerprint)) != 1 {
+		user, err := ValidateAccessToken(token)
+		return user, false, err
+	}
+	user, err := findUserByLegacyAccessToken(token)
+	// Verify the stored credential exactly even with a case-insensitive SQL collation.
+	if user != nil && subtle.ConstantTimeCompare([]byte(AccessTokenFingerprint(user.GetAccessToken())), []byte(fingerprint)) != 1 {
+		return nil, true, nil
+	}
+	return user, true, err
 }

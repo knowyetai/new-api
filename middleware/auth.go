@@ -237,11 +237,12 @@ func classifyDashboardCredential(c *gin.Context) (*model.UserBase, service.AuthI
 // accessTokenLookup is the per-request result of resolving an opaque dashboard
 // credential. A nil user with a nil err means the value is not a PAT.
 type accessTokenLookup struct {
-	ref    string
-	legacy bool
-	token  *model.UserAccessToken
-	user   *model.UserBase
-	err    error
+	ref                   string
+	legacy                bool
+	legacyModelCredential bool
+	token                 *model.UserAccessToken
+	user                  *model.UserBase
+	err                   error
 }
 
 // lookupAccessToken resolves raw once per request, so the access audit and
@@ -255,9 +256,17 @@ func lookupAccessToken(c *gin.Context, raw string) *accessTokenLookup {
 	c.Set(accessTokenLookupContextKey, lookup)
 	if !strings.HasPrefix(raw, model.AccessTokenPrefix) {
 		lookup.legacy = true
-		legacyUser, err := model.ValidateAccessToken(raw)
-		if err != nil || legacyUser == nil || legacyUser.Id <= 0 {
-			lookup.err = err
+		var legacyUser *model.User
+		if c.Request.Method+" "+c.FullPath() == modelCredentialAccessTokenRoute {
+			legacyUser, lookup.legacyModelCredential, lookup.err = model.ValidateModelCredentialLegacyAccessToken(raw)
+		} else {
+			legacyUser, lookup.err = model.ValidateAccessToken(raw)
+		}
+		if lookup.err != nil || legacyUser == nil || legacyUser.Id <= 0 {
+			return lookup
+		}
+		if lookup.legacyModelCredential {
+			lookup.user = legacyUser.ToBaseUser()
 			return lookup
 		}
 		lookup.user, lookup.err = model.GetUserCache(legacyUser.Id)
@@ -289,17 +298,24 @@ func requestAccessTokenLookup(c *gin.Context) *accessTokenLookup {
 func enforceAccessTokenRoute(c *gin.Context, lookup *accessTokenLookup, abort bool) bool {
 	key := c.Request.Method + " " + c.FullPath()
 	rule, declared := AccessTokenRouteRule(key)
+	scopes := lookup.token.GetScopes()
 	code, reason := "", ""
 	var message *common.Message
 	switch {
 	case declared && rule.kind == accessTokenRuleSession:
 		code, reason, message = "AUTH_SESSION_REQUIRED", "session_required", common.NewMessage(accessTokenSessionRequiredMsg)
-	case lookup.legacy:
+	case lookup.legacy && (key != modelCredentialAccessTokenRoute || lookup.legacyModelCredential):
+		if abort && lookup.legacyModelCredential {
+			setAccessTokenAuditParam(c, "legacy_model_credential", true)
+		}
 		return true
 	case !declared:
 		common.SysError(common.LogText("access token route is not declared: %s", key))
 		code, reason, message = "ACCESS_TOKEN_ROUTE_UNDECLARED", "route_undeclared", common.NewMessage("Unauthorized, insufficient privileges")
-	case rule.kind == accessTokenRuleAny, service.AccessTokenScopeGranted(lookup.token.GetScopes(), rule.scope):
+	// Dedicated provisioning tokens must also be rejected on routes that normally accept any PAT.
+	case key != modelCredentialAccessTokenRoute && service.AccessTokenScopeGranted(scopes, service.ModelCredentialAccessTokenScope):
+		code, reason, message = "ACCESS_TOKEN_SCOPE_DENIED", "scope_denied", common.NewMessage("Unauthorized, insufficient privileges")
+	case rule.kind == accessTokenRuleAny, service.AccessTokenScopeGranted(scopes, rule.scope):
 		return true
 	default:
 		code, reason, message = "ACCESS_TOKEN_SCOPE_DENIED", "scope_denied", common.NewMessage("The access token lacks the required permission: {{scope}}", map[string]any{"scope": rule.scope})
